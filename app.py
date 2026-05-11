@@ -3,7 +3,9 @@ from __future__ import annotations
 import time
 import logging
 import html
+import math
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
@@ -29,7 +31,6 @@ from polymarket_tracker.metrics import (
     repetitive_size_ratio,
     score_wallet,
     whale_tier,
-    why_ranked_highly,
 )
 from polymarket_tracker.firebase_store import (
     DEFAULT_USER_SETTINGS,
@@ -228,6 +229,164 @@ def inject_whalewatch_theme() -> None:
             color: var(--ww-red);
             border-color: rgba(255, 82, 109, 0.34);
             background: var(--ww-red-soft);
+        }
+
+        .ww-tier {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 5.7rem;
+            padding: 0.24rem 0.48rem;
+            border: 1px solid var(--ww-border);
+            font-weight: 900;
+            border-radius: 6px;
+            text-transform: uppercase;
+            font-size: 0.72rem;
+        }
+
+        .ww-tier-kraken {
+            color: #ff526d;
+            border-color: rgba(255, 82, 109, 0.58);
+            background: rgba(255, 82, 109, 0.11);
+            box-shadow: 0 0 22px rgba(255, 82, 109, 0.28);
+        }
+
+        .ww-tier-leviathan {
+            color: #b784ff;
+            border-color: rgba(183, 132, 255, 0.58);
+            background: rgba(183, 132, 255, 0.11);
+            box-shadow: 0 0 22px rgba(183, 132, 255, 0.26);
+        }
+
+        .ww-tier-blue-whale {
+            color: var(--ww-blue);
+            border-color: rgba(25, 184, 255, 0.46);
+            background: rgba(25, 184, 255, 0.10);
+            box-shadow: 0 0 16px rgba(25, 184, 255, 0.18);
+        }
+
+        .ww-tier-shark {
+            color: var(--ww-green);
+            border-color: rgba(32, 242, 156, 0.34);
+            background: rgba(32, 242, 156, 0.08);
+            box-shadow: 0 0 10px rgba(32, 242, 156, 0.10);
+        }
+
+        .ww-tier-dolphin {
+            color: #9aa8b8;
+            border-color: rgba(154, 168, 184, 0.22);
+            background: rgba(154, 168, 184, 0.05);
+        }
+
+        .ww-wallet-panel {
+            border: 1px solid var(--ww-border);
+            background: linear-gradient(145deg, rgba(10, 17, 30, 0.95), rgba(4, 8, 15, 0.92));
+            box-shadow: var(--ww-shadow);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-top: 1rem;
+        }
+
+        .ww-wallet-address {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            color: var(--ww-text);
+            word-break: break-all;
+            font-size: 0.92rem;
+        }
+
+        .ww-wallet-table-wrap {
+            width: 100%;
+            overflow-x: auto;
+            border: 1px solid var(--ww-border);
+            background: linear-gradient(145deg, rgba(8, 14, 25, 0.96), rgba(4, 8, 15, 0.94));
+            box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
+            border-radius: 8px;
+        }
+
+        .ww-wallet-table {
+            min-width: 1240px;
+        }
+
+        .ww-wallet-row {
+            display: grid;
+            grid-template-columns: 122px 128px 92px 92px 112px 86px 92px 118px 124px 124px 98px 92px;
+            align-items: center;
+            min-height: 58px;
+            border-bottom: 1px solid rgba(116, 147, 185, 0.12);
+            transition: background 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+        }
+
+        .ww-wallet-row:last-child {
+            border-bottom: 0;
+        }
+
+        .ww-wallet-row:hover {
+            background: rgba(25, 184, 255, 0.055);
+            box-shadow: inset 2px 0 0 rgba(25, 184, 255, 0.48);
+        }
+
+        .ww-wallet-row.is-selected {
+            background: linear-gradient(90deg, rgba(25, 184, 255, 0.12), rgba(32, 242, 156, 0.05));
+            box-shadow: inset 2px 0 0 var(--ww-green), 0 0 28px rgba(25, 184, 255, 0.08);
+        }
+
+        .ww-wallet-head {
+            min-height: 42px;
+            background: rgba(255, 255, 255, 0.035);
+            color: var(--ww-muted);
+            font-size: 0.72rem;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        .ww-wallet-cell {
+            padding: 0.65rem 0.72rem;
+            color: var(--ww-text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .ww-wallet-short {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            color: var(--ww-text);
+            font-weight: 800;
+        }
+
+        .ww-num {
+            display: block;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            font-weight: 800;
+        }
+
+        .ww-num-muted { color: var(--ww-muted); }
+        .ww-num-positive { color: var(--ww-green); }
+        .ww-num-negative { color: var(--ww-red); }
+        .ww-num-blue { color: var(--ww-blue); }
+
+        .ww-select-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            min-height: 2rem;
+            border: 1px solid rgba(25, 184, 255, 0.42);
+            background: rgba(25, 184, 255, 0.11);
+            color: var(--ww-text) !important;
+            text-decoration: none !important;
+            font-size: 0.72rem;
+            font-weight: 900;
+            text-transform: uppercase;
+            border-radius: 6px;
+            transition: transform 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+        }
+
+        .ww-select-link:hover {
+            transform: translateY(-1px);
+            border-color: rgba(32, 242, 156, 0.55);
+            box-shadow: 0 0 18px rgba(25, 184, 255, 0.18);
         }
 
         .ww-section {
@@ -499,6 +658,20 @@ def style_financial_table(table_df: pd.DataFrame):
 
     for col in positive_cols:
         styled = styled.map(color_value, subset=[col])
+    if "whale_tier" in table_df.columns:
+        def color_tier(value):
+            tier = str(value or "").lower()
+            if tier == "kraken":
+                return "color: #ff526d; font-weight: 900; text-shadow: 0 0 10px rgba(255, 82, 109, 0.55);"
+            if tier == "leviathan":
+                return "color: #b784ff; font-weight: 900; text-shadow: 0 0 10px rgba(183, 132, 255, 0.5);"
+            if tier == "blue whale":
+                return "color: #19b8ff; font-weight: 900; text-shadow: 0 0 8px rgba(25, 184, 255, 0.38);"
+            if tier == "shark":
+                return "color: #20f29c; font-weight: 800; text-shadow: 0 0 6px rgba(32, 242, 156, 0.24);"
+            return "color: #9aa8b8; font-weight: 700;"
+
+        styled = styled.map(color_tier, subset=["whale_tier"])
     if "bot_penalty" in table_df.columns:
         def color_bot_penalty(value):
             try:
@@ -534,6 +707,81 @@ def render_empty_state(title: str, body: str) -> None:
 
 def badge(text: str, tone: str = "blue") -> str:
     return f'<span class="ww-badge ww-badge-{tone}">{text}</span>'
+
+
+def tier_class(tier: str) -> str:
+    return str(tier or "Dolphin").lower().replace(" ", "-")
+
+
+def tier_html(tier: str) -> str:
+    safe_tier = html.escape(str(tier or "Dolphin"))
+    return f'<span class="ww-tier ww-tier-{tier_class(safe_tier)}">{safe_tier}</span>'
+
+
+def short_wallet(wallet: str) -> str:
+    wallet = str(wallet or "")
+    return f"{wallet[:6]}...{wallet[-4:]}" if len(wallet) > 12 else wallet
+
+
+def signal_badges(row: dict) -> str:
+    signals = []
+    if (row.get("adjusted_win_rate") or row.get("win_rate") or 0) >= 60:
+        signals.append("High Win Rate")
+    if (row.get("roi_pct") or 0) >= 20:
+        signals.append("Strong ROI")
+    if (row.get("total_volume") or 0) >= 50000:
+        signals.append("High Volume")
+    if (row.get("avg_trade_size") or 0) >= 500:
+        signals.append("Large Positions")
+    if (row.get("trend_score") or 0) >= 50 or (row.get("recent_activity") or 0) >= 20:
+        signals.append("Trending")
+    if (row.get("consistency_score") or 0) >= 60:
+        signals.append("Consistent")
+    return ", ".join(signals[:3]) or "Balanced"
+
+
+def safe_number(value, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(number) or math.isinf(number):
+        return default
+    return number
+
+
+def number_tone(value, blue_zero: bool = False) -> str:
+    number = safe_number(value)
+    if number > 0:
+        return "ww-num-positive"
+    if number < 0:
+        return "ww-num-negative"
+    return "ww-num-blue" if blue_zero else "ww-num-muted"
+
+
+def format_money(value) -> str:
+    number = safe_number(value)
+    if number < 0:
+        return f"-${abs(number):,.2f}"
+    return f"${number:,.2f}"
+
+
+def format_percent(value) -> str:
+    return f"{safe_number(value):.2f}%"
+
+
+def format_score(value) -> str:
+    return f"{safe_number(value):.2f}"
+
+
+def current_query_wallet() -> str | None:
+    try:
+        value = st.query_params.get("selected_wallet")
+    except Exception:
+        return None
+    if isinstance(value, list):
+        return str(value[0]) if value else None
+    return str(value) if value else None
 
 
 inject_whalewatch_theme()
@@ -1295,6 +1543,128 @@ def trending_whales(rows: list[dict], limit: int = 6) -> pd.DataFrame:
             item["trend_score"] = round(min(100, trend_score), 2)
             trending.append(item)
     return pd.DataFrame(sorted(trending, key=lambda row: row.get("trend_score", 0), reverse=True)[:limit])
+
+
+def add_compact_wallet_table_fields(df: pd.DataFrame) -> pd.DataFrame:
+    display_df = df.copy()
+    if "wallet" not in display_df.columns:
+        display_df["wallet"] = ""
+    if "trend_score" not in display_df.columns:
+        trend_lookup = {}
+        trend_df = trending_whales(display_df.to_dict("records"), limit=len(display_df))
+        if not trend_df.empty and "wallet" in trend_df.columns:
+            trend_lookup = {
+                str(row["wallet"]).lower(): row.get("trend_score", 0)
+                for _, row in trend_df.iterrows()
+            }
+        display_df["trend_score"] = display_df["wallet"].astype(str).str.lower().map(trend_lookup).fillna(0.0)
+    display_df["wallet_full"] = display_df["wallet"].astype(str)
+    display_df["wallet_display"] = display_df["wallet_full"].map(short_wallet)
+    display_df["signals"] = [signal_badges(row) for row in display_df.to_dict("records")]
+    return display_df
+
+
+def render_wallet_results_table(df: pd.DataFrame, selected_wallet: str | None = None) -> None:
+    headers = [
+        "Tier",
+        "Wallet address",
+        "Whale score",
+        "Trend score",
+        "Net profit",
+        "ROI %",
+        "Win rate",
+        "Adjusted win",
+        "Total volume",
+        "Average position",
+        "Recent trades",
+        "Select",
+    ]
+    rows_html = [
+        '<div class="ww-wallet-row ww-wallet-head">'
+        + "".join(f'<div class="ww-wallet-cell">{header}</div>' for header in headers)
+        + "</div>"
+    ]
+    selected_lower = str(selected_wallet or "").lower()
+    for _, row in df.iterrows():
+        wallet = str(row.get("wallet") or "")
+        wallet_lower = wallet.lower()
+        tier = str(row.get("whale_tier") or "Dolphin")
+        score = row.get("whale_score", row.get("final_score", 0))
+        selected_class = " is-selected" if wallet_lower and wallet_lower == selected_lower else ""
+        select_href = f"?selected_wallet={quote(wallet)}#wallet-results"
+        cells = [
+            tier_html(tier),
+            f'<span class="ww-wallet-short" title="{html.escape(wallet)}">{html.escape(short_wallet(wallet))}</span>',
+            f'<span class="ww-num ww-num-blue">{format_score(score)}</span>',
+            f'<span class="ww-num ww-num-blue">{format_score(row.get("trend_score", 0))}</span>',
+            f'<span class="ww-num {number_tone(row.get("net_profit"))}">{format_money(row.get("net_profit"))}</span>',
+            f'<span class="ww-num {number_tone(row.get("roi_pct"))}">{format_percent(row.get("roi_pct"))}</span>',
+            f'<span class="ww-num ww-num-blue">{format_percent(row.get("win_rate"))}</span>',
+            f'<span class="ww-num ww-num-blue">{format_percent(row.get("adjusted_win_rate"))}</span>',
+            f'<span class="ww-num ww-num-blue">{format_money(row.get("total_volume"))}</span>',
+            f'<span class="ww-num ww-num-blue">{format_money(row.get("avg_trade_size"))}</span>',
+            f'<span class="ww-num ww-num-blue">{int(safe_number(row.get("recent_activity"))):,}</span>',
+            f'<a class="ww-select-link" href="{select_href}">Select</a>',
+        ]
+        rows_html.append(
+            f'<div class="ww-wallet-row{selected_class}">'
+            + "".join(f'<div class="ww-wallet-cell">{cell}</div>' for cell in cells)
+            + "</div>"
+        )
+    st.markdown(
+        '<div id="wallet-results"></div><div class="ww-wallet-table-wrap"><div class="ww-wallet-table">'
+        + "".join(rows_html)
+        + "</div></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_selected_wallet_panel(selected_wallet: str, selected_metadata: dict | None) -> None:
+    if not selected_metadata:
+        return
+    tier = str(selected_metadata.get("whale_tier") or "Dolphin")
+    signals = [item.strip() for item in signal_badges(selected_metadata).split(",") if item.strip()]
+    explanation = str(selected_metadata.get("why_ranked_highly") or "Balanced profit, volume, activity, and copyability signals.")
+    st.markdown(
+        f"""
+        <div class="ww-wallet-panel">
+          <div class="ww-brand-row">
+            <div>
+              <div class="ww-eyebrow">Selected Wallet</div>
+              <div style="margin: 0.35rem 0;">{tier_html(tier)}</div>
+              <div class="ww-wallet-address">{html.escape(selected_wallet)}</div>
+            </div>
+            <div class="ww-pill-row">{''.join(badge(item, "green" if item in ("Strong ROI", "High Win Rate", "Consistent") else "blue") for item in signals[:3])}</div>
+          </div>
+          <div class="ww-terminal-line"></div>
+          <div class="ww-section-copy">{html.escape(explanation)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    metric_cols = st.columns(5)
+    with metric_cols[0]:
+        render_metric_card("Win Rate", f"{float(selected_metadata.get('win_rate') or 0):.2f}%", "Resolved markets", "blue")
+    with metric_cols[1]:
+        render_metric_card("ROI", f"{float(selected_metadata.get('roi_pct') or 0):.2f}%", "Return profile", "green" if (selected_metadata.get("roi_pct") or 0) >= 0 else "red")
+    with metric_cols[2]:
+        render_metric_card("Net Profit", f"${float(selected_metadata.get('net_profit') or 0):,.2f}", "Realized P/L", "green" if (selected_metadata.get("net_profit") or 0) >= 0 else "red")
+    with metric_cols[3]:
+        render_metric_card("Total Volume", f"${float(selected_metadata.get('total_volume') or 0):,.2f}", "Capital flow", "blue")
+    with metric_cols[4]:
+        render_metric_card("Whale Score", f"{float(selected_metadata.get('whale_score') or 0):.2f}", "Weighted rank", "green")
+    action_cols = st.columns([1, 1, 3])
+    if action_cols[0].button(
+        "Add to Watchlist",
+        disabled=selected_wallet in st.session_state["watchlist"],
+        key="add-selected-wallet",
+    ):
+        add_wallet_to_watchlist(selected_wallet, selected_metadata)
+        st.rerun()
+    if action_cols[1].button("Recent Trades", key="selected-wallet-recent-trades"):
+        st.session_state["selected_wallet"] = selected_wallet
+        st.session_state["trade_viewer_wallet"] = selected_wallet
+        st.info("Open Wallet Details from the sidebar to inspect recent trades.")
 
 
 def market_link_for_trade(trade: dict) -> str:
@@ -2128,61 +2498,18 @@ if df.empty:
     st.stop()
 
 if whale_mode:
-    trending_df = trending_whales(filtered)
-    if not trending_df.empty:
-        render_section_header(
-            "Trending Whales",
-            "Recent Activity Spike",
-            "Wallets with unusually strong recent flow, weighted by volume and position size.",
-            right_html=badge("Hot tape", "green"),
-        )
-        trending_columns = [
-            "wallet",
-            "whale_tier",
-            "trend_score",
-            "recent_activity",
-            "total_volume",
-            "avg_trade_size",
-            "whale_score",
-            "why_ranked_highly",
-        ]
-        for column in trending_columns:
-            if column not in trending_df.columns:
-                trending_df[column] = None
-        st.dataframe(
-            style_financial_table(trending_df[trending_columns]),
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "wallet": "Wallet",
-                "whale_tier": "Tier",
-                "trend_score": st.column_config.NumberColumn("Trend score", format="%.2f"),
-                "recent_activity": st.column_config.NumberColumn("Recent trades", format="%d"),
-                "total_volume": st.column_config.NumberColumn("Volume", format="$%.2f"),
-                "avg_trade_size": st.column_config.NumberColumn("Avg position", format="$%.2f"),
-                "whale_score": st.column_config.NumberColumn("Whale score", format="%.2f"),
-                "why_ranked_highly": "Why it is trending",
-            },
-        )
-
-if whale_mode:
     columns = [
-        "wallet",
         "whale_tier",
+        "wallet",
         "net_profit",
         "roi_pct",
         "win_rate",
         "adjusted_win_rate",
         "total_volume",
         "avg_trade_size",
-        "largest_trade",
-        "resolved_markets",
-        "trade_count",
         "recent_activity",
         "whale_score",
-        "bot_penalty",
-        "bot_likeness_warning",
-        "why_ranked_highly",
+        "trend_score",
     ]
 else:
     columns = [
@@ -2201,66 +2528,55 @@ else:
         "copyability_score",
         "final_score",
     ]
+df = add_compact_wallet_table_fields(df)
+if "whale_tier" not in df.columns:
+    df["whale_tier"] = "Dolphin"
+if "whale_score" not in df.columns:
+    df["whale_score"] = df.get("final_score", 0)
 for column in columns:
     if column not in df.columns:
         df[column] = None
-st.caption("Select a row to open recent trade flow. WhaleWatch is read-only and never places trades.")
-ranking_event = st.dataframe(
-    style_financial_table(df[columns]),
-    use_container_width=True,
-    hide_index=True,
-    on_select="rerun",
-    selection_mode="single-row",
-    key="wallet_rankings_table",
-    column_config={
-        "wallet": "Wallet address",
-        "whale_tier": "Tier",
-        "polygonscan_url": st.column_config.LinkColumn("Polygonscan", display_text="Open"),
-        "polymarket_profile_url": st.column_config.LinkColumn("Polymarket", display_text="Open"),
-        "adjusted_win_rate": st.column_config.NumberColumn("Adjusted win rate", format="%.2f%%"),
-        "final_score": st.column_config.NumberColumn("Score", format="%.2f"),
-        "whale_score": st.column_config.NumberColumn("Whale score", format="%.2f"),
-        "bot_penalty": st.column_config.NumberColumn("Bot penalty", format="%.2f"),
-        "net_profit": st.column_config.NumberColumn("Net profit", format="$%.2f"),
-        "roi_pct": st.column_config.NumberColumn("ROI %", format="%.2f%%"),
-        "win_rate": st.column_config.NumberColumn("Win rate", format="%.2f%%"),
-        "total_volume": st.column_config.NumberColumn("Total traded volume", format="$%.2f"),
-        "avg_trade_size": st.column_config.NumberColumn("Average trade size", format="$%.2f"),
-        "largest_trade": st.column_config.NumberColumn("Largest trade", format="$%.2f"),
-        "trade_count": st.column_config.NumberColumn("Trades", format="%d"),
-        "trade_liquidity_proxy": st.column_config.NumberColumn("Trade liquidity proxy", format="$%.2f"),
-        "unique_markets": st.column_config.NumberColumn("Unique markets", format="%d"),
-        "recent_activity": st.column_config.NumberColumn("Recent activity", format="%d"),
-        "bot_likeness_warning": "Bot-likeness warning",
-        "why_ranked_highly": "Why ranked highly",
-    },
-)
+visible_columns = [
+    "whale_tier",
+    "wallet",
+    "whale_score",
+    "trend_score",
+    "net_profit",
+    "roi_pct",
+    "win_rate",
+    "adjusted_win_rate",
+    "total_volume",
+    "avg_trade_size",
+    "recent_activity",
+]
+for column in visible_columns:
+    if column not in df.columns:
+        df[column] = 0 if column not in ("whale_tier", "wallet") else ""
 
+query_wallet = current_query_wallet()
+available_wallets = {str(wallet).lower() for wallet in df["wallet"].dropna().astype(str)}
 selected_wallet = None
-if isinstance(ranking_event, dict):
-    selected_rows = ranking_event.get("selection", {}).get("rows", [])
-else:
-    selected_rows = getattr(getattr(ranking_event, "selection", None), "rows", [])
-if selected_rows:
-    selected_wallet = str(df.iloc[selected_rows[0]]["wallet"])
+if query_wallet and query_wallet.lower() in available_wallets:
+    selected_wallet = query_wallet
+elif str(st.session_state.get("selected_wallet") or "").lower() in available_wallets:
+    selected_wallet = str(st.session_state["selected_wallet"])
+if selected_wallet:
     st.session_state["selected_wallet"] = selected_wallet
-else:
-    selected_wallet = st.session_state.get("selected_wallet")
+
+st.caption("Use the Select button in the table to open the compact wallet panel. Hover the shortened address for the full wallet.")
+table_columns = visible_columns + ["wallet_display", "signals", "why_ranked_highly"]
+for column in table_columns:
+    if column not in df.columns:
+        df[column] = ""
+render_wallet_results_table(df[table_columns], selected_wallet)
 
 if selected_wallet:
     selected_row = df[df["wallet"].astype(str) == selected_wallet]
     selected_metadata = selected_row.iloc[0].to_dict() if not selected_row.empty else None
-    action_cols = st.columns([3, 1])
-    action_cols[0].caption(f"Selected wallet: {selected_wallet}")
-    if action_cols[1].button(
-        "Add to Watchlist",
-        disabled=selected_wallet in st.session_state["watchlist"],
-        key="add-selected-wallet",
-    ):
-        add_wallet_to_watchlist(selected_wallet, selected_metadata)
-        st.rerun()
+    render_selected_wallet_panel(selected_wallet, selected_metadata)
 
-csv = df[columns].to_csv(index=False).encode("utf-8")
+csv_columns = [column for column in columns if column in df.columns]
+csv = df[csv_columns].to_csv(index=False).encode("utf-8")
 st.download_button("Export results to CSV", csv, "whalewatch_wallet_rankings.csv", "text/csv")
 
 with st.expander("How the score works"):

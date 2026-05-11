@@ -27,7 +27,12 @@ from polymarket_tracker.metrics import (
     repetitive_size_ratio,
     score_wallet,
 )
-from polymarket_tracker.supabase_store import DEFAULT_USER_SETTINGS, SupabaseError, SupabaseStore
+from polymarket_tracker.supabase_store import (
+    DEFAULT_USER_SETTINGS,
+    SUPABASE_CONNECTION_ERROR,
+    SupabaseError,
+    SupabaseStore,
+)
 
 
 st.set_page_config(page_title="Poly Radar", layout="wide")
@@ -50,9 +55,13 @@ def db_connection():
 
 def read_supabase_secrets() -> tuple[str, str] | None:
     try:
-        return str(st.secrets["SUPABASE_URL"]), str(st.secrets["SUPABASE_ANON_KEY"])
+        url = str(st.secrets["SUPABASE_URL"]).strip().rstrip("/")
+        anon_key = str(st.secrets["SUPABASE_ANON_KEY"]).strip()
     except Exception:
         return None
+    if not url or not anon_key:
+        return None
+    return url, anon_key
 
 
 @st.cache_resource
@@ -65,6 +74,13 @@ def get_supabase_store() -> SupabaseStore | None:
     if not config:
         return None
     return supabase_store(*config)
+
+
+def show_supabase_error(action: str, exc: SupabaseError) -> None:
+    if exc.status_code is None and str(exc) == SUPABASE_CONNECTION_ERROR:
+        st.error(SUPABASE_CONNECTION_ERROR)
+    else:
+        st.error(f"{action} failed: {exc}")
 
 
 def reset_user_runtime_state() -> None:
@@ -117,6 +133,15 @@ def render_auth_page() -> None:
         st.error("Supabase is not configured. Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit secrets.")
         st.stop()
 
+    st.caption(f"Supabase URL: `{store.url}`")
+    if st.button("Test Supabase connection"):
+        try:
+            store.test_connection()
+        except SupabaseError as exc:
+            show_supabase_error("Supabase connection test", exc)
+        else:
+            st.success("Supabase connection looks good.")
+
     login_tab, signup_tab = st.tabs(["Log in", "Sign up"])
     with login_tab:
         with st.form("login-form"):
@@ -130,7 +155,7 @@ def render_auth_page() -> None:
             try:
                 session = store.sign_in(email.strip(), password)
             except SupabaseError as exc:
-                st.error(f"Login failed: {exc}")
+                show_supabase_error("Login", exc)
             else:
                 reset_user_runtime_state()
                 save_auth_session(session)
@@ -148,7 +173,7 @@ def render_auth_page() -> None:
             try:
                 session = store.sign_up(signup_email.strip(), signup_password)
             except SupabaseError as exc:
-                st.error(f"Signup failed: {exc}")
+                show_supabase_error("Signup", exc)
             else:
                 if session:
                     reset_user_runtime_state()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import logging
+import html
 from dataclasses import dataclass
 
 import pandas as pd
@@ -35,13 +36,491 @@ from polymarket_tracker.firebase_store import (
 )
 
 
-st.set_page_config(page_title="Poly Radar", layout="wide")
+APP_NAME = "WhaleWatch"
+APP_TAGLINE = "Track smart money across prediction markets."
+
+st.set_page_config(page_title=APP_NAME, layout="wide")
 logger = logging.getLogger(__name__)
 
 MAX_RECENT_TRADES_FAST = 1000
 MAX_WALLETS_FAST = 50
 MAX_API_CALLS_PER_RUN = 100
 MAX_RUN_SECONDS = 60
+
+
+def inject_whalewatch_theme() -> None:
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+
+        :root {
+            --ww-bg: #05070d;
+            --ww-bg-2: #080d16;
+            --ww-panel: rgba(11, 17, 29, 0.92);
+            --ww-panel-2: rgba(14, 23, 38, 0.92);
+            --ww-border: rgba(116, 147, 185, 0.18);
+            --ww-border-strong: rgba(37, 179, 255, 0.36);
+            --ww-text: #edf6ff;
+            --ww-muted: #8ea1b7;
+            --ww-blue: #19b8ff;
+            --ww-blue-soft: rgba(25, 184, 255, 0.13);
+            --ww-green: #20f29c;
+            --ww-green-soft: rgba(32, 242, 156, 0.12);
+            --ww-red: #ff526d;
+            --ww-red-soft: rgba(255, 82, 109, 0.12);
+            --ww-amber: #ffd166;
+            --ww-shadow: 0 22px 70px rgba(0, 0, 0, 0.45);
+        }
+
+        html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
+            background:
+                radial-gradient(circle at 15% 0%, rgba(25, 184, 255, 0.12), transparent 28rem),
+                radial-gradient(circle at 85% 12%, rgba(32, 242, 156, 0.08), transparent 24rem),
+                linear-gradient(135deg, #03050a 0%, #07101d 52%, #05070d 100%) !important;
+            color: var(--ww-text) !important;
+            font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        .block-container {
+            max-width: 1500px;
+            padding-top: 1.15rem;
+            padding-bottom: 4rem;
+        }
+
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, rgba(5, 9, 16, 0.98), rgba(9, 15, 27, 0.96)) !important;
+            border-right: 1px solid var(--ww-border);
+            box-shadow: 18px 0 60px rgba(0, 0, 0, 0.28);
+        }
+
+        [data-testid="stSidebar"] * {
+            color: var(--ww-text);
+        }
+
+        [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+            letter-spacing: 0;
+        }
+
+        h1, h2, h3 {
+            letter-spacing: 0 !important;
+        }
+
+        .ww-topbar {
+            position: sticky;
+            top: 0;
+            z-index: 99;
+            margin: -0.25rem 0 1.25rem;
+            padding: 1rem 1.15rem;
+            border: 1px solid var(--ww-border);
+            background: linear-gradient(135deg, rgba(5, 9, 16, 0.92), rgba(12, 20, 34, 0.86));
+            backdrop-filter: blur(18px);
+            box-shadow: var(--ww-shadow);
+            border-radius: 8px;
+        }
+
+        .ww-auth-shell {
+            min-height: 76vh;
+            display: flex;
+            align-items: center;
+        }
+
+        .ww-auth-card, .ww-panel, .ww-section {
+            border: 1px solid var(--ww-border);
+            background: linear-gradient(145deg, var(--ww-panel), rgba(7, 12, 21, 0.88));
+            box-shadow: var(--ww-shadow);
+            border-radius: 8px;
+        }
+
+        .ww-auth-card {
+            padding: 2rem;
+            margin: 1rem 0 1.25rem;
+        }
+
+        .ww-brand-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+        }
+
+        .ww-logo {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.72rem;
+            font-weight: 900;
+            font-size: clamp(2.2rem, 5vw, 4.35rem);
+            line-height: 0.94;
+            color: var(--ww-text);
+            text-transform: uppercase;
+        }
+
+        .ww-logo-mark {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 2.55em;
+            height: 1.08em;
+            border: 2px solid var(--ww-blue);
+            box-shadow: 0 0 26px rgba(25, 184, 255, 0.48), inset 0 0 18px rgba(25, 184, 255, 0.18);
+            transform: skew(-13deg);
+            border-radius: 3px;
+            color: var(--ww-blue);
+            font-size: 0.38em;
+            letter-spacing: 0;
+        }
+
+        .ww-logo-small {
+            font-size: 1.55rem;
+            letter-spacing: 0;
+        }
+
+        .ww-tagline {
+            color: var(--ww-muted);
+            font-size: 1.02rem;
+            margin-top: 0.55rem;
+        }
+
+        .ww-terminal-line {
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--ww-blue), var(--ww-green), transparent);
+            opacity: 0.72;
+            margin: 1rem 0 0;
+        }
+
+        .ww-pill-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.55rem;
+        }
+
+        .ww-badge, .ww-user-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.42rem;
+            min-height: 1.9rem;
+            border: 1px solid var(--ww-border);
+            background: rgba(255, 255, 255, 0.035);
+            color: var(--ww-muted);
+            padding: 0.38rem 0.65rem;
+            font-size: 0.78rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            border-radius: 6px;
+        }
+
+        .ww-badge-blue {
+            color: var(--ww-blue);
+            border-color: rgba(25, 184, 255, 0.34);
+            background: var(--ww-blue-soft);
+        }
+
+        .ww-badge-green {
+            color: var(--ww-green);
+            border-color: rgba(32, 242, 156, 0.34);
+            background: var(--ww-green-soft);
+        }
+
+        .ww-badge-red {
+            color: var(--ww-red);
+            border-color: rgba(255, 82, 109, 0.34);
+            background: var(--ww-red-soft);
+        }
+
+        .ww-section {
+            padding: 1rem 1.1rem;
+            margin: 1rem 0;
+        }
+
+        .ww-section-head {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 1rem;
+            margin: 1rem 0 0.8rem;
+        }
+
+        .ww-eyebrow {
+            color: var(--ww-blue);
+            font-size: 0.76rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .ww-section-title {
+            color: var(--ww-text);
+            font-size: clamp(1.35rem, 2.4vw, 2rem);
+            font-weight: 850;
+            margin-top: 0.15rem;
+        }
+
+        .ww-section-copy {
+            color: var(--ww-muted);
+            font-size: 0.94rem;
+            margin-top: 0.25rem;
+        }
+
+        .ww-metric-card {
+            min-height: 116px;
+            padding: 1rem;
+            border: 1px solid var(--ww-border);
+            background: linear-gradient(145deg, rgba(10, 17, 30, 0.92), rgba(4, 8, 15, 0.9));
+            box-shadow: 0 12px 44px rgba(0, 0, 0, 0.3);
+            transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+            border-radius: 8px;
+        }
+
+        .ww-metric-card:hover {
+            transform: translateY(-2px);
+            border-color: var(--ww-border-strong);
+            box-shadow: 0 18px 58px rgba(25, 184, 255, 0.09);
+        }
+
+        .ww-metric-label {
+            color: var(--ww-muted);
+            font-size: 0.74rem;
+            text-transform: uppercase;
+            font-weight: 800;
+        }
+
+        .ww-metric-value {
+            margin-top: 0.5rem;
+            color: var(--ww-text);
+            font-size: clamp(1.45rem, 2.5vw, 2.15rem);
+            font-weight: 900;
+        }
+
+        .ww-metric-note {
+            margin-top: 0.45rem;
+            color: var(--ww-muted);
+            font-size: 0.8rem;
+        }
+
+        .ww-accent-green .ww-metric-value { color: var(--ww-green); }
+        .ww-accent-blue .ww-metric-value { color: var(--ww-blue); }
+        .ww-accent-red .ww-metric-value { color: var(--ww-red); }
+
+        .ww-empty {
+            border: 1px dashed rgba(142, 161, 183, 0.26);
+            background: rgba(9, 15, 27, 0.66);
+            padding: 1.3rem;
+            color: var(--ww-muted);
+            margin: 1rem 0;
+            border-radius: 8px;
+        }
+
+        .ww-empty-title {
+            color: var(--ww-text);
+            font-weight: 800;
+            font-size: 1.05rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .ww-live {
+            width: 0.62rem;
+            height: 0.62rem;
+            border-radius: 999px;
+            background: var(--ww-green);
+            box-shadow: 0 0 0 rgba(32, 242, 156, 0.6);
+            animation: wwPulse 1.8s infinite;
+        }
+
+        @keyframes wwPulse {
+            0% { box-shadow: 0 0 0 0 rgba(32, 242, 156, 0.48); }
+            70% { box-shadow: 0 0 0 10px rgba(32, 242, 156, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(32, 242, 156, 0); }
+        }
+
+        .stButton > button, .stDownloadButton > button, [data-testid="stFormSubmitButton"] button {
+            border: 1px solid rgba(25, 184, 255, 0.34) !important;
+            background: linear-gradient(135deg, rgba(25, 184, 255, 0.2), rgba(32, 242, 156, 0.08)) !important;
+            color: var(--ww-text) !important;
+            font-weight: 800 !important;
+            transition: transform 150ms ease, box-shadow 150ms ease, border-color 150ms ease !important;
+            border-radius: 6px !important;
+        }
+
+        .stButton > button:hover, .stDownloadButton > button:hover, [data-testid="stFormSubmitButton"] button:hover {
+            transform: translateY(-1px);
+            border-color: rgba(32, 242, 156, 0.55) !important;
+            box-shadow: 0 0 22px rgba(25, 184, 255, 0.18);
+        }
+
+        input, textarea, [data-baseweb="select"] > div, [data-baseweb="input"] > div {
+            background-color: rgba(4, 8, 15, 0.88) !important;
+            border-color: var(--ww-border) !important;
+            color: var(--ww-text) !important;
+            border-radius: 6px !important;
+        }
+
+        [data-testid="stDataFrame"] {
+            border: 1px solid var(--ww-border);
+            box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
+            border-radius: 8px;
+        }
+
+        [data-testid="stMetric"] {
+            border: 1px solid var(--ww-border);
+            background: rgba(10, 17, 30, 0.84);
+            padding: 0.8rem 0.9rem;
+            border-radius: 8px;
+        }
+
+        [data-testid="stAlert"] {
+            border: 1px solid var(--ww-border);
+            background: rgba(11, 17, 29, 0.9);
+            border-radius: 8px;
+        }
+
+        [data-testid="stProgress"] > div > div > div {
+            background: linear-gradient(90deg, var(--ww-blue), var(--ww-green)) !important;
+        }
+
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 0.5rem;
+            border-bottom: 1px solid var(--ww-border);
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            background: rgba(255, 255, 255, 0.035);
+            border: 1px solid var(--ww-border);
+            color: var(--ww-muted);
+            font-weight: 800;
+            border-radius: 6px 6px 0 0;
+        }
+
+        .stTabs [aria-selected="true"] {
+            border-color: var(--ww-border-strong);
+            color: var(--ww-blue);
+            background: var(--ww-blue-soft);
+        }
+
+        hr {
+            border-color: var(--ww-border) !important;
+        }
+
+        a {
+            color: var(--ww-blue) !important;
+        }
+
+        @media (max-width: 820px) {
+            .block-container { padding-left: 0.9rem; padding-right: 0.9rem; }
+            .ww-brand-row { align-items: flex-start; flex-direction: column; }
+            .ww-topbar { position: static; }
+            .ww-auth-card { padding: 1.2rem; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_brand_header(compact: bool = False, right_html: str = "") -> None:
+    logo_class = "ww-logo ww-logo-small" if compact else "ww-logo"
+    wrapper_class = "ww-topbar" if compact else "ww-auth-card"
+    st.markdown(
+        f"""
+        <div class="{wrapper_class}">
+          <div class="ww-brand-row">
+            <div>
+              <div class="{logo_class}"><span class="ww-logo-mark">WW</span>{APP_NAME}</div>
+              <div class="ww-tagline">{APP_TAGLINE}</div>
+            </div>
+            <div>{right_html}</div>
+          </div>
+          <div class="ww-terminal-line"></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_section_header(title: str, eyebrow: str = "", copy: str = "", right_html: str = "") -> None:
+    st.markdown(
+        f"""
+        <div class="ww-section-head">
+          <div>
+            <div class="ww-eyebrow">{eyebrow}</div>
+            <div class="ww-section-title">{title}</div>
+            <div class="ww-section-copy">{copy}</div>
+          </div>
+          <div>{right_html}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_metric_card(label: str, value: str, note: str = "", accent: str = "blue") -> None:
+    st.markdown(
+        f"""
+        <div class="ww-metric-card ww-accent-{accent}">
+          <div class="ww-metric-label">{label}</div>
+          <div class="ww-metric-value">{value}</div>
+          <div class="ww-metric-note">{note}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def style_financial_table(table_df: pd.DataFrame):
+    styled = table_df.style
+    positive_cols = [
+        col
+        for col in [
+            "net_profit",
+            "roi_pct",
+            "total_volume",
+            "whale_score",
+            "final_score",
+            "dollar_value",
+            "avg_trade_size",
+            "largest_trade",
+        ]
+        if col in table_df.columns
+    ]
+    warning_cols = [col for col in ["bot_likeness_warning"] if col in table_df.columns]
+
+    def color_value(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return ""
+        if number > 0:
+            return "color: #20f29c; font-weight: 800;"
+        if number < 0:
+            return "color: #ff526d; font-weight: 800;"
+        return "color: #8ea1b7;"
+
+    for col in positive_cols:
+        styled = styled.map(color_value, subset=[col])
+    for col in warning_cols:
+        styled = styled.map(
+            lambda value: "color: #ffd166; font-weight: 700;" if value else "color: #8ea1b7;",
+            subset=[col],
+        )
+    return styled
+
+
+def render_empty_state(title: str, body: str) -> None:
+    st.markdown(
+        f"""
+        <div class="ww-empty">
+          <div class="ww-empty-title">{title}</div>
+          <div>{body}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def badge(text: str, tone: str = "blue") -> str:
+    return f'<span class="ww-badge ww-badge-{tone}">{text}</span>'
+
+
+inject_whalewatch_theme()
 
 
 def api_client() -> PolymarketClient:
@@ -78,9 +557,22 @@ def get_firebase_store() -> FirebaseStore | None:
 
 def show_firebase_error(action: str, exc: FirebaseError) -> None:
     if exc.status_code is None and str(exc) == FIREBASE_CONNECTION_ERROR:
-        st.error(FIREBASE_CONNECTION_ERROR)
+        st.error("Login service is temporarily unavailable. Please try again later.")
     else:
-        st.error(f"{action} failed: {exc}")
+        st.error(f"{action} failed: {friendly_auth_error(str(exc))}")
+
+
+def friendly_auth_error(message: str) -> str:
+    normalized = message.upper()
+    if "EMAIL_EXISTS" in normalized:
+        return "An account with that email already exists."
+    if "EMAIL_NOT_FOUND" in normalized or "INVALID_PASSWORD" in normalized or "INVALID_LOGIN_CREDENTIALS" in normalized:
+        return "The email or password is incorrect."
+    if "WEAK_PASSWORD" in normalized:
+        return "Please choose a stronger password."
+    if "TOO_MANY_ATTEMPTS" in normalized:
+        return "Too many attempts. Please wait a moment and try again."
+    return "Please check your details and try again."
 
 
 def reset_user_runtime_state() -> None:
@@ -129,15 +621,18 @@ def current_auth_session() -> dict | None:
 
 
 def render_auth_page() -> None:
-    st.title("Poly Radar")
-    st.caption("Sign in to keep your watchlist, alerts, and settings private to your account.")
+    render_brand_header()
     store = get_firebase_store()
     if not store:
-        st.error("Firebase is not configured. Add FIREBASE_WEB_API_KEY and FIREBASE_PROJECT_ID to Streamlit secrets.")
+        st.error("Login is temporarily unavailable. Please contact the app owner.")
         st.stop()
 
-    st.caption(f"Firebase project: `{store.project_id}`")
-
+    render_section_header(
+        "Secure Access",
+        "Authentication",
+        "Sign in or create an account to unlock private watchlists, alerts, and saved settings.",
+        right_html=badge("Read-only", "green"),
+    )
     login_tab, signup_tab = st.tabs(["Log in", "Sign up"])
     with login_tab:
         with st.form("login-form"):
@@ -199,8 +694,9 @@ def sync_user_data_from_firebase(force: bool = False) -> None:
         st.session_state["watchlist_items"] = store.fetch_watchlist(str(session["id_token"]), user_id)
         st.session_state["user_settings"] = store.fetch_user_settings(str(session["id_token"]), user_id)
         st.session_state["loaded_user_id"] = user_id
-    except FirebaseError as exc:
-        st.error(f"Could not load your Firebase data: {exc}")
+    except FirebaseError:
+        logger.warning("Could not load account data", exc_info=True)
+        st.error("Could not load your account data. Please try again later.")
         st.stop()
     ensure_watchlist_state()
 
@@ -233,8 +729,9 @@ def add_wallet_to_watchlist(wallet: str, row: dict | None = None) -> None:
             str(session["user_id"]),
             wallet,
         )
-    except FirebaseError as exc:
-        st.error(f"Could not add wallet to watchlist: {exc}")
+    except FirebaseError:
+        logger.warning("Could not add wallet to watchlist", exc_info=True)
+        st.error("Could not add wallet to watchlist right now.")
         return
     existing = {item["wallet"].lower(): item for item in st.session_state["watchlist_items"]}
     item = saved_items[0] if saved_items else existing.get(wallet, {"wallet": wallet})
@@ -262,8 +759,9 @@ def remove_wallet_from_watchlist(wallet: str) -> None:
         return
     try:
         store.delete_watchlist_wallet(str(session["id_token"]), str(session["user_id"]), wallet)
-    except FirebaseError as exc:
-        st.error(f"Could not remove wallet from watchlist: {exc}")
+    except FirebaseError:
+        logger.warning("Could not remove wallet from watchlist", exc_info=True)
+        st.error("Could not remove wallet from watchlist right now.")
         return
     st.session_state["watchlist_items"] = [
         item for item in st.session_state["watchlist_items"] if str(item.get("wallet", "")).lower() != wallet
@@ -296,8 +794,9 @@ def update_user_settings(**updates) -> None:
             str(session["user_id"]),
             updated,
         )
-    except FirebaseError as exc:
-        st.warning(f"Could not save settings: {exc}")
+    except FirebaseError:
+        logger.warning("Could not save account settings", exc_info=True)
+        st.warning("Could not save settings right now.")
 
 
 @dataclass
@@ -706,8 +1205,12 @@ def latest_trade_time(wallet: str) -> str:
 
 
 def render_wallet_trade_viewer(wallet_options: list[str], selected_wallet: str | None = None) -> None:
-    st.subheader("Wallet Trade Viewer")
-    st.caption("Read-only recent trade viewer. No orders are placed and no wallet connection is used.")
+    render_section_header(
+        "Wallet Detail View",
+        "Trade Tape",
+        "Inspect recent public fills, market status, and position flow for a selected wallet.",
+        right_html=f'{badge("Read-only", "green")}',
+    )
 
     if wallet_options:
         viewer_wallet = st.selectbox(
@@ -727,7 +1230,7 @@ def render_wallet_trade_viewer(wallet_options: list[str], selected_wallet: str |
     lookback_days = {"Last 24h": 1, "Last 7d": 7, "Last 30d": 30}[lookback_label]
 
     if not viewer_wallet:
-        st.info("Select a ranked or watched wallet to view recent trades.")
+        render_empty_state("No wallet selected", "Select a ranked or watched wallet to view its recent public trade tape.")
         return
 
     add_disabled = viewer_wallet in st.session_state["watchlist"]
@@ -759,10 +1262,10 @@ def render_wallet_trade_viewer(wallet_options: list[str], selected_wallet: str |
         "market_status",
     ]
     if trade_df.empty:
-        st.info("No trades match the current filters.")
+        render_empty_state("No matching trades", "Adjust the time window, side, open-market, or minimum size filters.")
         return
     st.dataframe(
-        trade_df[trade_columns],
+        style_financial_table(trade_df[trade_columns]),
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -912,10 +1415,15 @@ def detect_watchlist_alerts(
 
 
 def render_new_alerts() -> None:
-    st.subheader("New alerts")
+    render_section_header(
+        "New Alerts",
+        "Watchlist Signal",
+        "Fresh watched-wallet trades appear here after the first quiet baseline refresh.",
+        right_html=f'{badge("Live", "green")}',
+    )
     alerts = st.session_state.get("new_trade_alerts", [])
     if not alerts:
-        st.caption("No new alerts yet. New watched-wallet trades above the alert minimum will appear here.")
+        render_empty_state("No new alerts", "New watched-wallet trades above the alert minimum will appear here.")
         return
     clear_col, count_col = st.columns([1, 4])
     if clear_col.button("Clear alerts", key="clear-watchlist-alerts"):
@@ -925,7 +1433,7 @@ def render_new_alerts() -> None:
     alert_df = pd.DataFrame(alerts)
     alert_columns = ["wallet", "market", "outcome", "side", "price", "size", "dollar_value", "timestamp", "market_link"]
     st.dataframe(
-        alert_df[alert_columns],
+        style_financial_table(alert_df[alert_columns]),
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -969,7 +1477,11 @@ def render_watchlist_body(
     render_new_alerts()
 
     st.divider()
-    st.caption("Saved wallets")
+    render_section_header(
+        "Saved Wallets",
+        "Private Watchlist",
+        "Wallets are stored under your account and never shared with other users.",
+    )
     header = st.columns([4, 1, 1, 1, 2, 1])
     header[0].markdown("**Wallet address**")
     header[1].markdown("**Whale score**")
@@ -994,9 +1506,13 @@ def render_watchlist_body(
             st.rerun()
 
     st.divider()
-    st.subheader("Recent Watchlist Trades")
+    render_section_header(
+        "Recent Watchlist Trades",
+        "Live Tape",
+        "Latest public activity from all saved wallets, with whale rows highlighted.",
+    )
     if watchlist_df.empty:
-        st.info("No recent watchlist trades found yet.")
+        render_empty_state("No recent watchlist trades", "Refresh the watchlist or add active wallets from the leaderboard.")
         return
 
     watchlist_columns = [
@@ -1011,7 +1527,7 @@ def render_watchlist_body(
     ]
 
     def highlight_whales(row):
-        style = "background-color: rgba(255, 215, 0, 0.22)" if row.get("whale_wallet") else ""
+        style = "background-color: rgba(25, 184, 255, 0.14); color: #edf6ff; font-weight: 700;" if row.get("whale_wallet") else ""
         return [style for _ in row]
 
     st.dataframe(
@@ -1033,13 +1549,18 @@ def render_watchlist_body(
 
 
 def render_watchlist_page(ranked_df: pd.DataFrame | None = None, whale_mode: bool = True) -> None:
-    st.subheader("Watchlist")
+    render_section_header(
+        "Watchlist",
+        "Whale Monitor",
+        "Track saved wallets, refresh their public trade tape, and surface new activity above your alert threshold.",
+        right_html=f'{badge("Auto-refresh", "green")}',
+    )
     ensure_watchlist_state()
     watchlist_items = st.session_state["watchlist_items"]
     settings_state = user_settings()
 
     controls = st.columns([1, 1, 1, 1])
-    auto_refresh = controls[0].checkbox("Auto-refresh Watchlist", value=True)
+    auto_refresh = controls[0].checkbox("Auto-refresh Watchlist", value=True, help="Refreshes watched-wallet trade flow on a timer.")
     refresh_seconds = controls[1].selectbox(
         "Refresh interval",
         [30, 60],
@@ -1049,12 +1570,14 @@ def render_watchlist_page(ranked_df: pd.DataFrame | None = None, whale_mode: boo
     enable_popup_alerts = controls[2].checkbox(
         "Enable popup alerts",
         value=bool(settings_state["popup_alerts_enabled"]),
+        help="Shows a toast when a watched wallet has a new trade above your alert minimum.",
     )
     alert_min_trade_value = controls[3].number_input(
         "Alert minimum trade size ($)",
         min_value=0.0,
         value=float(settings_state["min_trade_size"]),
         step=50.0,
+        help="Only alert on watched-wallet trades at or above this dollar value.",
     )
     update_user_settings(
         min_trade_size=float(alert_min_trade_value),
@@ -1063,7 +1586,7 @@ def render_watchlist_page(ranked_df: pd.DataFrame | None = None, whale_mode: boo
     play_sound = st.checkbox("Play subtle sound", value=False)
 
     if not watchlist_items:
-        st.info("No wallets in watchlist yet. Add wallets from the dashboard.")
+        render_empty_state("No wallets in watchlist yet", "Add wallets from the leaderboard to build your private whale monitor.")
         return
 
     if st.button("Refresh Watchlist Trades"):
@@ -1108,18 +1631,41 @@ sync_user_data_from_firebase()
 auth_session = current_auth_session()
 settings_state = user_settings()
 
-st.title("Poly Radar")
-st.caption("Ranks public wallets for research only. This app never places trades or asks for private keys.")
+user_email = html.escape(str(auth_session.get("email", "unknown") if auth_session else "unknown"))
+render_brand_header(
+    compact=True,
+    right_html=(
+        f'<div class="ww-pill-row">{badge("Live terminal", "green")}'
+        f'<span class="ww-user-pill">{user_email}</span></div>'
+    ),
+)
 
 with st.sidebar:
+    st.markdown(
+        f"""
+        <div class="ww-pill-row" style="margin-bottom:0.65rem;">
+          {badge("Read-only", "green")}
+          {badge("Private watchlist", "blue")}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.caption(f"Logged in as {auth_session.get('email', 'unknown') if auth_session else 'unknown'}")
     if st.button("Logout"):
         sign_out()
     page = st.radio("Page", ["Dashboard", "Wallet Details", "Watchlist"])
     st.header("Discovery")
-    whale_mode = st.checkbox("Whale Mode", value=bool(settings_state["whale_mode_enabled"]))
+    whale_mode = st.checkbox(
+        "Whale Mode",
+        value=bool(settings_state["whale_mode_enabled"]),
+        help="Prioritizes wallets with meaningful capital, larger trade sizes, and cleaner non-bot behavior.",
+    )
     update_user_settings(whale_mode_enabled=bool(whale_mode))
-    fast_mode = st.checkbox("Fast Mode", value=not whale_mode)
+    fast_mode = st.checkbox(
+        "Fast Mode",
+        value=not whale_mode,
+        help="Uses recent trades only for a quick ranked view. Disable it for deeper historical metrics.",
+    )
     market_category = st.selectbox("Market category", list(CATEGORY_KEYWORDS.keys()))
     time_period_days = st.selectbox("Time period", [30, 90, 180], index=1, format_func=lambda d: f"Last {d} days")
     max_recent_trades = st.number_input(
@@ -1145,41 +1691,50 @@ with st.sidebar:
     )
     st.header("Filters")
     if whale_mode:
-        min_net_profit = st.slider("Minimum net profit", 0, 100000, 2000, 500)
-        min_volume = st.slider("Minimum total volume", 0, 1000000, 25000, 5000)
-        min_avg_trade_size = st.slider("Minimum average trade size", 0, 10000, 250, 50)
-        min_largest_trade = st.slider("Minimum largest trade", 0, 100000, 1000, 500)
-        min_resolved = st.slider("Minimum resolved markets", 0, 250, 50, 5)
+        min_net_profit = st.slider("Minimum net profit", 0, 100000, 2000, 500, help="Filters for wallets with realized positive outcomes, not just activity.")
+        min_volume = st.slider("Minimum total volume", 0, 1000000, 25000, 5000, help="Total observed dollars traded by the wallet.")
+        min_avg_trade_size = st.slider("Minimum average trade size", 0, 10000, 250, 50, help="Raises the capital threshold to reduce tiny-wallet noise.")
+        min_largest_trade = st.slider("Minimum largest trade", 0, 100000, 1000, 500, help="Requires at least one position large enough to matter.")
+        min_resolved = st.slider("Minimum resolved markets", 0, 250, 50, 5, help="Sample-size guardrail for reliability.")
     else:
         min_net_profit = 0
         min_avg_trade_size = 0
         min_largest_trade = 0
         min_resolved = st.number_input("Minimum resolved markets", min_value=0, value=5 if fast_mode else 50, step=5)
         min_volume = st.number_input("Minimum total volume", min_value=0.0, value=100.0 if fast_mode else 1000.0, step=250.0)
-    min_win_rate = st.number_input("Minimum win rate %", min_value=0.0, max_value=100.0, value=50.0, step=1.0)
-    min_roi = st.number_input("Minimum ROI %", min_value=-100.0, value=0.0, step=1.0)
-    min_unique_markets = st.number_input("Minimum unique markets", min_value=0, value=0, step=1)
-    exclude_lucky = st.checkbox("Exclude one lucky big win", value=True)
-    exclude_low_liq = st.checkbox("Exclude weak trade-data liquidity", value=True)
-    include_timing = st.checkbox("Estimate entry timing from price history", value=False, disabled=fast_mode)
+    min_win_rate = st.number_input("Minimum win rate %", min_value=0.0, max_value=100.0, value=50.0, step=1.0, help="Raw resolved-market win rate threshold.")
+    min_roi = st.number_input("Minimum ROI %", min_value=-100.0, value=0.0, step=1.0, help="Profit relative to capital deployed where historical data is available.")
+    min_unique_markets = st.number_input("Minimum unique markets", min_value=0, value=0, step=1, help="Diversification guardrail across distinct markets.")
+    exclude_lucky = st.checkbox("Exclude one lucky big win", value=True, help="Removes wallets whose profit is overly concentrated in one outcome.")
+    exclude_low_liq = st.checkbox("Exclude weak trade-data liquidity", value=True, help="Uses trade-data proxies rather than fragile open-interest endpoints.")
+    include_timing = st.checkbox("Estimate entry timing from price history", value=False, disabled=fast_mode, help="Optional and best-effort. Ranking still works when price history is unavailable.")
     analyze = st.button("Analyze manual wallets")
 
 wallets = normalize_wallets(wallet_text)
+
+if page == "Dashboard":
+    render_section_header(
+        "Whale Discovery",
+        "Market Intelligence",
+        "Scan public prediction-market flow, isolate high-capital wallets, and rank copyability signals.",
+        right_html=f'{badge("Whale Mode" if whale_mode else "Standard Mode", "green" if whale_mode else "blue")}',
+    )
 
 if discover:
     try:
         run_started_at = time.time()
         scan_status = st.empty()
         scan_progress = st.progress(0, "Scanning recent trades...")
-        wallets, recent_trades = discover_wallets_from_recent_trades(
-            int(time_period_days),
-            str(market_category),
-            int(max_recent_trades),
-            int(max_wallets),
-            progress=scan_progress,
-            status=scan_status,
-            started_at=run_started_at,
-        )
+        with st.spinner("Scanning live market flow..."):
+            wallets, recent_trades = discover_wallets_from_recent_trades(
+                int(time_period_days),
+                str(market_category),
+                int(max_recent_trades),
+                int(max_wallets),
+                progress=scan_progress,
+                status=scan_status,
+                started_at=run_started_at,
+            )
         st.session_state["discovered_wallets"] = wallets
         st.session_state["recent_trades"] = recent_trades
         st.success("Fetched recent trades successfully.")
@@ -1200,12 +1755,19 @@ if analyze and wallets:
     st.session_state["discovered_wallets"] = wallets
 
 candidates = st.session_state.get("discovered_wallets", wallets)[: int(max_wallets)]
-st.caption(f"Analyzing {len(candidates)} candidate wallets")
+st.markdown(
+    f"""
+    <div class="ww-pill-row" style="margin: 0.4rem 0 1rem;">
+      <span class="ww-badge ww-badge-blue"><span class="ww-live"></span>{len(candidates)} candidate wallets armed</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 if (discover and not fast_mode) or analyze:
     rows = []
     price_history_warning = False
-    progress = st.progress(0, "Fetching public Polymarket data...")
+    progress = st.progress(0, "Fetching public market intelligence...")
     status = st.empty()
     run_started_at = time.time()
     analyzed_wallets = candidates[: int(max_wallets)]
@@ -1234,7 +1796,10 @@ if not rows:
     if page == "Wallet Details":
         render_wallet_trade_viewer(st.session_state["watchlist"], st.session_state.get("selected_wallet"))
         st.stop()
-    st.info("Click Discover Wallets to scan recent public trades, or paste wallets and click Analyze manual wallets.")
+    render_empty_state(
+        "No whale scan loaded",
+        "Use Discover Wallets to scan recent public trade flow, or paste known wallets in the sidebar and run a manual analysis.",
+    )
     st.stop()
 
 if st.session_state.get("price_history_warning"):
@@ -1311,18 +1876,29 @@ if page == "Wallet Details":
     render_wallet_trade_viewer(detail_wallets, st.session_state.get("selected_wallet"))
     st.stop()
 
-top_cols = st.columns(4)
-top_cols[0].metric("Wallets analyzed", len(rows))
-top_cols[1].metric("Wallets passing filters", len(filtered))
+render_section_header(
+    "Whale Leaderboard",
+    "Ranked Signal",
+    "Prioritizes realized edge, capital deployed, sample size, and copyability under the active filters.",
+    right_html=f'{badge("Read-only analytics", "green")}{badge("CSV export", "blue")}',
+)
+
 score_column = "whale_score" if whale_mode else "final_score"
 if score_column not in df.columns:
     df[score_column] = 0
-top_cols[2].metric("Best score", f"{df[score_column].max():.2f}" if not df.empty else "N/A")
 roi_values = pd.to_numeric(df["roi_pct"], errors="coerce").dropna() if not df.empty else pd.Series(dtype=float)
-top_cols[3].metric("Median ROI", f"{roi_values.median():.2f}%" if not roi_values.empty else "N/A")
+top_cols = st.columns(4)
+with top_cols[0]:
+    render_metric_card("Wallets analyzed", f"{len(rows):,}", "Public wallets processed", "blue")
+with top_cols[1]:
+    render_metric_card("Passing filters", f"{len(filtered):,}", "Qualified whale candidates", "green")
+with top_cols[2]:
+    render_metric_card("Best score", f"{df[score_column].max():.2f}" if not df.empty else "N/A", score_column.replace("_", " ").title(), "green")
+with top_cols[3]:
+    render_metric_card("Median ROI", f"{roi_values.median():.2f}%" if not roi_values.empty else "N/A", "Filtered wallet set", "blue")
 
 if df.empty:
-    st.warning("No wallets passed the current filters. Lower the thresholds or include more wallets.")
+    render_empty_state("No wallets passed", "Lower the thresholds or scan a larger wallet set to widen the signal pool.")
     st.stop()
 
 if whale_mode:
@@ -1359,9 +1935,9 @@ else:
 for column in columns:
     if column not in df.columns:
         df[column] = None
-st.caption("Click a wallet row to open its recent trade viewer. This is read-only.")
+st.caption("Select a row to open recent trade flow. WhaleWatch is read-only and never places trades.")
 ranking_event = st.dataframe(
-    df[columns],
+    style_financial_table(df[columns]),
     use_container_width=True,
     hide_index=True,
     on_select="rerun",
@@ -1412,7 +1988,7 @@ if selected_wallet:
         st.rerun()
 
 csv = df[columns].to_csv(index=False).encode("utf-8")
-st.download_button("Export results to CSV", csv, "polymarket_wallet_rankings.csv", "text/csv")
+st.download_button("Export results to CSV", csv, "whalewatch_wallet_rankings.csv", "text/csv")
 
 with st.expander("How the score works"):
     st.markdown(

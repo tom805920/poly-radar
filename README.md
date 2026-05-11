@@ -1,6 +1,6 @@
-# Poly Radar
+# WhaleWatch
 
-A beginner-friendly Streamlit dashboard for ranking public Polymarket wallets that may be worth researching for copy-trading ideas.
+A premium Streamlit dashboard for ranking public Polymarket wallets that may be worth researching for copy-trading ideas.
 
 This is research-only software. It does not place trades, sign orders, request private keys, or connect to a wallet.
 Users must log in with Firebase Authentication before using the dashboard. Watchlists, alert settings, and Whale Mode preference are stored per user in Firestore.
@@ -49,7 +49,7 @@ The app uses public, unauthenticated Polymarket endpoints:
 - `https://data-api.polymarket.com/trades`
 - `https://clob.polymarket.com/prices-history`
 
-Order-book liquidity/open-interest data is not required for the MVP. Poly Radar uses safer trade-data proxies instead: total traded volume, average trade size, unique markets, recent activity, and resolved market count.
+Order-book liquidity/open-interest data is not required for the MVP. WhaleWatch uses safer trade-data proxies instead: total traded volume, average trade size, unique markets, recent activity, and resolved market count.
 
 The Polymarket Data API currently limits `/trades` historical pagination. The app uses `MAX_OFFSET = 3000`, never requests offsets at or above that limit, caches recent trade pages, and scans discovery candidates by one-day windows inside the selected lookback period.
 
@@ -102,7 +102,7 @@ FIREBASE_PROJECT_ID = "your-firebase-project-id"
 
 Find the Web API key in **Project settings > General > Web API Key**. Use the Firebase project ID from the same settings page. Do not add service account files, private keys, seed phrases, or trading credentials.
 
-Poly Radar stores user data in these Firestore paths:
+WhaleWatch stores user data in these Firestore paths:
 
 ```text
 users/{user_id}/watchlist/{wallet_address}

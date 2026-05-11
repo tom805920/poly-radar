@@ -96,6 +96,69 @@ def bot_likeness_warning(
     return "; ".join(warnings)
 
 
+def bot_likeness_penalty(
+    trade_count: int,
+    avg_trade_size: float,
+    largest_trade: float,
+    same_size_ratio: float,
+    total_volume: float,
+    unique_markets: int,
+) -> float:
+    penalty = 0.0
+    if trade_count >= 300 and avg_trade_size < 100:
+        penalty += 35
+    if trade_count >= 80 and avg_trade_size < 75:
+        penalty += 22
+    if avg_trade_size < 50 and trade_count >= 20:
+        penalty += 18
+    elif avg_trade_size < 150 and trade_count >= 20:
+        penalty += 10
+    if same_size_ratio >= 0.75 and trade_count >= 20:
+        penalty += 25
+    elif same_size_ratio >= 0.55 and trade_count >= 20:
+        penalty += 12
+    if largest_trade < 250 and trade_count >= 15:
+        penalty += 14
+    if unique_markets <= 2 and trade_count >= 30:
+        penalty += 10
+    if total_volume < 5000 and trade_count >= 75:
+        penalty += 12
+    return clamp(penalty, 0, 65)
+
+
+def whale_tier(score: float) -> str:
+    if score >= 85:
+        return "Kraken"
+    if score >= 70:
+        return "Leviathan"
+    if score >= 55:
+        return "Blue Whale"
+    if score >= 38:
+        return "Shark"
+    return "Dolphin"
+
+
+def why_ranked_highly(row: dict[str, Any]) -> str:
+    reasons: list[str] = []
+    if safe_float(row.get("net_profit")) > 0:
+        reasons.append(f"${safe_float(row.get('net_profit')):,.0f} realized profit")
+    if safe_float(row.get("total_volume")) >= 25000:
+        reasons.append(f"${safe_float(row.get('total_volume')):,.0f} traded volume")
+    if safe_float(row.get("adjusted_win_rate")) >= 55:
+        reasons.append(f"{safe_float(row.get('adjusted_win_rate')):.1f}% adjusted win rate")
+    if safe_float(row.get("avg_trade_size")) >= 250:
+        reasons.append(f"${safe_float(row.get('avg_trade_size')):,.0f} average position")
+    if safe_float(row.get("unique_markets")) >= 8:
+        reasons.append(f"{int(safe_float(row.get('unique_markets')))} unique markets")
+    if safe_float(row.get("consistency_score")) >= 60:
+        reasons.append("consistent realized outcomes")
+    if safe_float(row.get("recent_activity")) >= 20:
+        reasons.append("strong recent activity")
+    if safe_float(row.get("bot_penalty")) >= 20:
+        reasons.append("penalized for bot-like patterns")
+    return "; ".join(reasons[:4]) or "ranked by balanced profit, volume, activity, and copyability signals"
+
+
 CATEGORY_KEYWORDS = {
     "All": [],
     "Politics": ["election", "president", "senate", "congress", "trump", "biden", "politic"],
@@ -232,7 +295,8 @@ def score_wallet(
     avg_entry_edge, entry_timing_score = calculate_entry_timing_scores(trades, price_history_by_asset)
 
     pnl_std = statistics.pstdev(pnl_series) if len(pnl_series) > 1 else 0.0
-    consistency = clamp((win_rate * 0.65) + clamp(100 - (pnl_std / max(abs(total_pnl), 1) * 250)) * 0.35)
+    profit_concentration_score = clamp(100 - lucky_big_win_share * 100)
+    consistency = clamp((adjusted_win_rate * 0.55) + clamp(100 - (pnl_std / max(abs(total_pnl), 1) * 180)) * 0.25 + profit_concentration_score * 0.20)
     roi_component = clamp(50 + roi_pct * 2)
     trade_reliability = clamp(math.log10(len(resolved) + 1) / math.log10(251) * 100)
     liquidity_quality = clamp(
@@ -257,14 +321,35 @@ def score_wallet(
         + liquidity_quality * 0.10
         + trade_reliability * 0.10
     )
-    whale_score = (
-        normalize_to_100(total_pnl, 25000) * 0.30
-        + normalize_to_100(total_volume, 250000) * 0.20
-        + normalize_to_100(roi_pct, 100) * 0.15
-        + adjusted_win_rate * 0.15
-        + normalize_to_100(avg_trade_size, 2500) * 0.10
-        + copyability * 0.10
+    profit_score = normalize_to_100(total_pnl, 30000)
+    volume_score = normalize_to_100(total_volume, 300000)
+    sizing_score = clamp(normalize_to_100(avg_trade_size, 2500) * 0.65 + normalize_to_100(largest_trade, 10000) * 0.35)
+    activity_frequency_score = clamp(
+        normalize_to_100(trade_count, 120) * 0.45
+        + normalize_to_100(recent_activity, 45) * 0.45
+        + normalize_to_100(unique_markets, 30) * 0.10
     )
+    diversity_score = normalize_to_100(unique_markets, 35)
+    bot_penalty = bot_likeness_penalty(
+        trade_count,
+        avg_trade_size,
+        largest_trade,
+        same_size_ratio,
+        total_volume,
+        unique_markets,
+    )
+    aggressive_bonus = 0.0
+    if largest_trade >= 5000 and avg_trade_size >= 500:
+        aggressive_bonus = min(5.0, normalize_to_100(largest_trade, 25000) * 0.05)
+    whale_score_raw = (
+        profit_score * 0.30
+        + adjusted_win_rate * 0.25
+        + volume_score * 0.20
+        + sizing_score * 0.10
+        + consistency * 0.10
+        + activity_frequency_score * 0.05
+    )
+    whale_score = clamp(whale_score_raw + diversity_score * 0.03 + aggressive_bonus - bot_penalty)
     warning = bot_likeness_warning(
         trade_count,
         avg_trade_size,
@@ -274,7 +359,7 @@ def score_wallet(
         total_volume,
     )
 
-    return {
+    result = {
         "wallet": wallet,
         "total_pnl": round(total_pnl, 2),
         "net_profit": round(total_pnl, 2),
@@ -295,17 +380,25 @@ def score_wallet(
         "entry_timing_score": round(entry_timing_score, 2) if entry_timing_score is not None else None,
         "price_history_available": price_history_available and entry_timing_score is not None,
         "max_drawdown": round(drawdown, 2),
+        "profit_score": round(profit_score, 2),
+        "volume_score": round(volume_score, 2),
+        "position_sizing_score": round(sizing_score, 2),
+        "activity_frequency_score": round(activity_frequency_score, 2),
+        "bot_penalty": round(bot_penalty, 2),
         "copyability_score": round(copyability, 2),
         "consistency_score": round(consistency, 2),
         "liquidity_quality_score": round(liquidity_quality, 2),
         "trade_count_reliability_score": round(trade_reliability, 2),
         "final_score": round(score, 2),
         "whale_score": round(whale_score, 2),
+        "whale_tier": whale_tier(whale_score),
         "bot_likeness_warning": warning,
         "lucky_big_win_share": round(lucky_big_win_share, 2),
         "polygonscan_url": f"https://polygonscan.com/address/{wallet}",
         "polymarket_profile_url": f"https://polymarket.com/profile/{wallet}",
     }
+    result["why_ranked_highly"] = why_ranked_highly(result)
+    return result
 
 
 def apply_filters(rows: list[dict[str, Any]], settings: FilterSettings) -> list[dict[str, Any]]:

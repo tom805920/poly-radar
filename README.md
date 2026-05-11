@@ -15,15 +15,15 @@ Users must log in with Firebase Authentication before using the dashboard. Watch
 
 ```text
 Whale Score =
-Net Profit x 0.30
-+ Total Volume x 0.20
-+ ROI x 0.15
-+ Adjusted Win Rate x 0.15
-+ Average Trade Size x 0.10
-+ Copyability x 0.10
+Profit x 0.30
++ Win Rate x 0.25
++ Volume Traded x 0.20
++ Position Sizing x 0.10
++ Consistency x 0.10
++ Activity Frequency x 0.05
 ```
 
-Each whale metric is normalized from 0 to 100 before weighting.
+Each whale metric is normalized from 0 to 100 before weighting. Bot-like repetition, tiny high-frequency flow, concentrated one-off wins, and weak sizing reduce the score. Wallets are grouped into tiers: Kraken, Leviathan, Blue Whale, Shark, and Dolphin.
 
 Standard Score =
 Adjusted Win Rate x 0.40
@@ -35,7 +35,8 @@ Adjusted Win Rate x 0.40
 
 Adjusted Win Rate is `(wallet wins + 5) / (wallet resolved markets + 10)` so small lucky samples do not rank first.
 
-- Filters out wallets with too few resolved markets, negative profit, low ROI, low win rate, low volume, one lucky big win, or weak trade-data liquidity quality.
+- Uses weighted scoring and moderate filters instead of excluding wallets for a single imperfect metric.
+- Shows why each wallet ranked highly and includes a Trending Whales section for unusually strong recent activity.
 - Exports the ranked table to CSV.
 - Lets you click/select a ranked wallet to inspect recent trades, market links, open/resolved status, and trade details.
 - Includes a private read-only copy watchlist that can refresh every 30 or 60 seconds, highlight trades from whale wallets, and show optional popup alerts for new watched-wallet trades.
@@ -123,14 +124,15 @@ Streamlit will print a local URL, usually `http://localhost:8501`.
 2. Choose a category and time period in the sidebar.
 3. Click **Discover Wallets** to scan recent public trades for active candidate wallets.
 4. Optionally paste known wallets and click **Analyze manual wallets**.
-5. Keep Whale Mode on for a stricter first pass:
-   - minimum $25,000 total volume
-   - minimum $2,000 net profit
-   - minimum $250 average trade size
-   - minimum $1,000 largest trade
-   - minimum 50 resolved markets
-   - exclude one lucky big win
-   - exclude tiny, repetitive, bot-like trade patterns
+5. Keep Whale Mode on for a whale-focused first pass:
+   - minimum whale score
+   - minimum realized profit
+   - minimum total volume
+   - minimum average position size
+   - minimum win rate
+   - optional aggressive trader inclusion
+   - optional bot inclusion
+   - score penalties for one-off wins and repetitive bot-like flow
 6. Review the ranked dashboard table.
 7. Add wallets to your private watchlist.
 8. Click **Export results to CSV** if you want the results in a spreadsheet.

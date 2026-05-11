@@ -21,12 +21,15 @@ from polymarket_tracker.metrics import (
     CATEGORY_KEYWORDS,
     FilterSettings,
     apply_filters,
+    bot_likeness_penalty,
     bot_likeness_warning,
     filter_items_by_period_and_category,
     normalize_wallets,
     normalize_to_100,
     repetitive_size_ratio,
     score_wallet,
+    whale_tier,
+    why_ranked_highly,
 )
 from polymarket_tracker.firebase_store import (
     DEFAULT_USER_SETTINGS,
@@ -496,6 +499,19 @@ def style_financial_table(table_df: pd.DataFrame):
 
     for col in positive_cols:
         styled = styled.map(color_value, subset=[col])
+    if "bot_penalty" in table_df.columns:
+        def color_bot_penalty(value):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return ""
+            if number >= 35:
+                return "color: #ff526d; font-weight: 900;"
+            if number >= 15:
+                return "color: #ffd166; font-weight: 800;"
+            return "color: #8ea1b7;"
+
+        styled = styled.map(color_bot_penalty, subset=["bot_penalty"])
     for col in warning_cols:
         styled = styled.map(
             lambda value: "color: #ffd166; font-weight: 700;" if value else "color: #8ea1b7;",
@@ -1011,10 +1027,38 @@ def calculate_fast_wallet_rows(recent_trades: list[dict], max_wallets: int) -> l
         avg_trade_size = total_volume / trade_count if trade_count else 0.0
         largest_trade = max(trade_sizes, default=0.0)
         same_size_ratio = repetitive_size_ratio(trade_sizes)
-        adjusted_activity = (trade_count + 5) / (trade_count + 10) * 100
-        volume_score = min(100.0, max(0.0, total_volume / 100))
-        reliability = min(100.0, (trade_count / 25) * 100)
-        final_score = adjusted_activity * 0.45 + volume_score * 0.35 + reliability * 0.20
+        unique_markets = resolved_markets
+        neutral_win_rate = 50.0
+        volume_score = normalize_to_100(total_volume, 300000)
+        sizing_score = min(
+            100.0,
+            normalize_to_100(avg_trade_size, 2500) * 0.65 + normalize_to_100(largest_trade, 10000) * 0.35,
+        )
+        consistency_score = max(0.0, min(100.0, (1 - same_size_ratio) * 100))
+        activity_frequency_score = min(
+            100.0,
+            normalize_to_100(trade_count, 120) * 0.60 + normalize_to_100(unique_markets, 30) * 0.40,
+        )
+        bot_penalty = bot_likeness_penalty(
+            trade_count,
+            avg_trade_size,
+            largest_trade,
+            same_size_ratio,
+            total_volume,
+            unique_markets,
+        )
+        final_score = min(
+            100.0,
+            max(
+                0.0,
+                neutral_win_rate * 0.35
+                + volume_score * 0.30
+                + sizing_score * 0.20
+                + consistency_score * 0.10
+                + activity_frequency_score * 0.05
+                - bot_penalty,
+            ),
+        )
         warning = bot_likeness_warning(
             trade_count,
             avg_trade_size,
@@ -1023,18 +1067,36 @@ def calculate_fast_wallet_rows(recent_trades: list[dict], max_wallets: int) -> l
             0.0,
             total_volume,
         )
-        whale_score = (
-            normalize_to_100(total_volume, 250000) * 0.35
-            + normalize_to_100(avg_trade_size, 2500) * 0.25
-            + normalize_to_100(largest_trade, 10000) * 0.25
-            + adjusted_activity * 0.15
+        whale_score = min(
+            100.0,
+            max(
+                0.0,
+                neutral_win_rate * 0.25
+                + volume_score * 0.20
+                + sizing_score * 0.10
+                + consistency_score * 0.10
+                + activity_frequency_score * 0.05
+                - bot_penalty,
+            ),
         )
+        tier = whale_tier(whale_score)
+        why = []
+        if total_volume >= 25000:
+            why.append(f"${total_volume:,.0f} recent traded volume")
+        if avg_trade_size >= 250:
+            why.append(f"${avg_trade_size:,.0f} average position")
+        if largest_trade >= 1000:
+            why.append(f"${largest_trade:,.0f} largest recent trade")
+        if unique_markets >= 5:
+            why.append(f"{unique_markets} active markets")
+        if bot_penalty >= 20:
+            why.append("penalized for bot-like repetition")
         rows.append(
             {
                 "wallet": wallet,
                 "polygonscan_url": f"https://polygonscan.com/address/{wallet}",
                 "polymarket_profile_url": f"https://polymarket.com/profile/{wallet}",
-                "adjusted_win_rate": round(adjusted_activity, 2),
+                "adjusted_win_rate": neutral_win_rate,
                 "win_rate": None,
                 "roi_pct": None,
                 "net_profit": None,
@@ -1048,9 +1110,15 @@ def calculate_fast_wallet_rows(recent_trades: list[dict], max_wallets: int) -> l
                 "recent_activity": trade_count,
                 "liquidity_warning": "Liquidity data unavailable for this wallet.",
                 "copyability_score": round(volume_score, 2),
+                "consistency_score": round(consistency_score, 2),
+                "activity_frequency_score": round(activity_frequency_score, 2),
+                "position_sizing_score": round(sizing_score, 2),
+                "bot_penalty": round(bot_penalty, 2),
                 "final_score": round(final_score, 2),
                 "whale_score": round(whale_score, 2),
+                "whale_tier": tier,
                 "bot_likeness_warning": warning,
+                "why_ranked_highly": "; ".join(why[:4]) or "ranked by recent volume, sizing, and activity balance",
                 "fast_mode": True,
             }
         )
@@ -1105,6 +1173,128 @@ def calculate_wallet_performance(
 
 def analyze_wallet(wallet: str, include_timing: bool, time_period_days: int, market_category: str) -> dict:
     return calculate_wallet_performance(wallet, time_period_days, market_category, include_timing)
+
+
+def strong_profit_volume(row: dict, min_profit: float, min_volume: float) -> bool:
+    return (row.get("net_profit") or 0) >= max(min_profit, 0) and (row.get("total_volume") or 0) >= max(min_volume * 1.5, 25000)
+
+
+def whale_row_quality_passes(
+    row: dict,
+    min_whale_score: float,
+    min_profit: float,
+    min_volume: float,
+    min_win_rate: float,
+    min_roi: float,
+    min_avg_trade_size: float,
+    min_largest_trade: float,
+    min_resolved: int,
+    include_aggressive_traders: bool,
+    include_bots: bool,
+    fast_mode_results: bool,
+) -> bool:
+    whale_score = float(row.get("whale_score") or 0)
+    total_volume = float(row.get("total_volume") or 0)
+    avg_trade_size = float(row.get("avg_trade_size") or 0)
+    largest_trade = float(row.get("largest_trade") or 0)
+    net_profit = float(row.get("net_profit") or 0)
+    roi_pct = row.get("roi_pct")
+    win_rate = row.get("win_rate")
+    bot_penalty = float(row.get("bot_penalty") or 0)
+    sample_count = max(int(row.get("resolved_markets") or 0), int(row.get("trade_count") or 0))
+    strong_capital = total_volume >= max(min_volume * 2, 30000) and avg_trade_size >= max(min_avg_trade_size, 150)
+    aggressive = include_aggressive_traders and strong_capital and largest_trade >= max(min_largest_trade, 1000)
+
+    if total_volume <= 0 and sample_count <= 0:
+        return False
+    if not include_bots and bot_penalty >= 45:
+        return False
+    if whale_score < min_whale_score and not strong_capital:
+        return False
+    if sample_count < min_resolved and not strong_capital:
+        return False
+    if total_volume < min_volume and whale_score < min_whale_score + 15:
+        return False
+    if avg_trade_size < min_avg_trade_size and not strong_capital:
+        return False
+    if largest_trade < min_largest_trade and not aggressive:
+        return False
+    if not fast_mode_results:
+        if net_profit < min_profit and not aggressive:
+            return False
+        if win_rate is not None and float(win_rate) < min_win_rate and not strong_profit_volume(row, min_profit, min_volume):
+            return False
+        if roi_pct is not None and float(roi_pct) < min_roi and not strong_profit_volume(row, min_profit, min_volume):
+            return False
+    return True
+
+
+def rank_whale_rows(
+    rows: list[dict],
+    min_whale_score: float,
+    min_profit: float,
+    min_volume: float,
+    min_win_rate: float,
+    min_roi: float,
+    min_avg_trade_size: float,
+    min_largest_trade: float,
+    min_resolved: int,
+    include_aggressive_traders: bool,
+    include_bots: bool,
+    fast_mode_results: bool,
+    max_rows: int,
+) -> tuple[list[dict], str]:
+    usable = [
+        row for row in rows
+        if (row.get("total_volume") or 0) > 0 or (row.get("resolved_markets") or 0) > 0 or (row.get("trade_count") or 0) > 0
+    ]
+    ranked = sorted(usable, key=lambda item: item.get("whale_score", 0), reverse=True)
+    preferred = [
+        row for row in ranked
+        if whale_row_quality_passes(
+            row,
+            min_whale_score,
+            min_profit,
+            min_volume,
+            min_win_rate,
+            min_roi,
+            min_avg_trade_size,
+            min_largest_trade,
+            min_resolved,
+            include_aggressive_traders,
+            include_bots,
+            fast_mode_results,
+        )
+    ]
+    if preferred:
+        return preferred, "preferred thresholds"
+    fallback = ranked[: max(1, min(max_rows, len(ranked)))]
+    reason = "best available wallets shown because no wallet passed every preferred threshold"
+    if not usable:
+        reason = "no usable data exists"
+    return fallback, reason
+
+
+def trending_whales(rows: list[dict], limit: int = 6) -> pd.DataFrame:
+    usable = [row for row in rows if (row.get("recent_activity") or 0) > 0]
+    if not usable:
+        return pd.DataFrame()
+    activities = sorted(float(row.get("recent_activity") or 0) for row in usable)
+    median_activity = activities[len(activities) // 2]
+    trending = []
+    for row in usable:
+        recent_activity = float(row.get("recent_activity") or 0)
+        trend_score = (
+            normalize_to_100(recent_activity, max(median_activity * 3, 30)) * 0.45
+            + normalize_to_100(float(row.get("total_volume") or 0), 150000) * 0.30
+            + normalize_to_100(float(row.get("avg_trade_size") or 0), 2000) * 0.15
+            + float(row.get("whale_score") or 0) * 0.10
+        )
+        if recent_activity >= max(5, median_activity * 1.5) or trend_score >= 35:
+            item = dict(row)
+            item["trend_score"] = round(min(100, trend_score), 2)
+            trending.append(item)
+    return pd.DataFrame(sorted(trending, key=lambda row: row.get("trend_score", 0), reverse=True)[:limit])
 
 
 def market_link_for_trade(trade: dict) -> str:
@@ -1708,21 +1898,25 @@ with st.sidebar:
     )
     st.header("Filters")
     if whale_mode:
-        min_net_profit = st.slider("Minimum net profit", 0, 100000, 2000, 500, help="Filters for wallets with realized positive outcomes, not just activity.")
-        min_volume = st.slider("Minimum total volume", 0, 1000000, 25000, 5000, help="Total observed dollars traded by the wallet.")
-        min_avg_trade_size = st.slider("Minimum average trade size", 0, 10000, 250, 50, help="Raises the capital threshold to reduce tiny-wallet noise.")
-        min_largest_trade = st.slider("Minimum largest trade", 0, 100000, 1000, 500, help="Requires at least one position large enough to matter.")
-        min_resolved = st.slider("Minimum resolved markets", 0, 250, 50, 5, help="Sample-size guardrail for reliability.")
+        min_whale_score = st.slider("Minimum whale score", 0, 100, 20, 5, help="Soft quality floor. If no wallets pass, WhaleWatch still shows the best available ranked wallets.")
+        min_net_profit = st.slider("Minimum net profit", -5000, 100000, 500, 500, help="Profit preference. Strong volume can still keep a wallet in the ranked fallback set.")
+        min_volume = st.slider("Minimum total volume", 0, 1000000, 10000, 5000, help="Total observed dollars traded by the wallet.")
+        min_avg_trade_size = st.slider("Minimum average trade size", 0, 10000, 150, 50, help="Raises the capital threshold to reduce tiny-wallet noise.")
+        min_largest_trade = st.slider("Minimum largest trade", 0, 100000, 500, 500, help="Requires at least one position large enough to matter.")
+        min_resolved = st.slider("Minimum resolved markets", 0, 250, 8, 1, help="Moderate sample-size guardrail for reliability.")
     else:
+        min_whale_score = 0
         min_net_profit = 0
         min_avg_trade_size = 0
         min_largest_trade = 0
         min_resolved = st.number_input("Minimum resolved markets", min_value=0, value=5 if fast_mode else 50, step=5)
         min_volume = st.number_input("Minimum total volume", min_value=0.0, value=100.0 if fast_mode else 1000.0, step=250.0)
-    min_win_rate = st.number_input("Minimum win rate %", min_value=0.0, max_value=100.0, value=50.0, step=1.0, help="Raw resolved-market win rate threshold.")
-    min_roi = st.number_input("Minimum ROI %", min_value=-100.0, value=0.0, step=1.0, help="Profit relative to capital deployed where historical data is available.")
+    min_win_rate = st.number_input("Minimum win rate %", min_value=0.0, max_value=100.0, value=45.0, step=1.0, help="Raw resolved-market win rate threshold.")
+    min_roi = st.number_input("Minimum ROI %", min_value=-100.0, value=-10.0 if whale_mode else 0.0, step=1.0, help="Profit relative to capital deployed where historical data is available.")
     min_unique_markets = st.number_input("Minimum unique markets", min_value=0, value=0, step=1, help="Diversification guardrail across distinct markets.")
-    exclude_lucky = st.checkbox("Exclude one lucky big win", value=True, help="Removes wallets whose profit is overly concentrated in one outcome.")
+    include_aggressive_traders = st.checkbox("Include aggressive traders", value=True, help="Keeps high-volume, high-position-size wallets even when ROI is volatile.")
+    include_bots = st.checkbox("Include bots", value=False, help="When off, wallets with strong bot-like repetition are heavily filtered after score penalties.")
+    exclude_lucky = st.checkbox("Down-rank one lucky big win", value=True, help="Large single-win concentration lowers score instead of fully removing the wallet.")
     exclude_low_liq = st.checkbox("Exclude weak trade-data liquidity", value=True, help="Uses trade-data proxies rather than fragile open-interest endpoints.")
     include_timing = st.checkbox("Estimate entry timing from price history", value=False, disabled=fast_mode, help="Optional and best-effort. Ranking still works when price history is unavailable.")
     analyze = st.button("Analyze manual wallets")
@@ -1868,38 +2062,23 @@ settings = FilterSettings(
 )
 
 if whale_mode:
-    required_profit = max(float(min_net_profit), 1000.0)
-    filtered = []
-    for row in rows:
-        warning = str(row.get("bot_likeness_warning") or "")
-        if st.session_state.get("fast_mode_results"):
-            if (row.get("total_volume") or 0) < float(min_volume):
-                continue
-            if (row.get("avg_trade_size") or 0) < float(min_avg_trade_size):
-                continue
-            if (row.get("largest_trade") or 0) < float(min_largest_trade):
-                continue
-        else:
-            if (row.get("net_profit") or 0) < required_profit:
-                continue
-            if (row.get("total_volume") or 0) < float(min_volume):
-                continue
-            if (row.get("avg_trade_size") or 0) < float(min_avg_trade_size):
-                continue
-            if (row.get("largest_trade") or 0) < float(min_largest_trade):
-                continue
-            if (row.get("resolved_markets") or 0) < int(min_resolved):
-                continue
-            if (row.get("lucky_big_win_share") or 0) > 0.45:
-                continue
-        if "Tiny average trade size" in warning:
-            continue
-        if "Repetitive same-size trades" in warning:
-            continue
-        if "High trade count with low average size" in warning:
-            continue
-        filtered.append(row)
-    filtered = sorted(filtered, key=lambda item: item.get("whale_score", 0), reverse=True)
+    filtered, whale_filter_reason = rank_whale_rows(
+        rows,
+        float(min_whale_score),
+        float(min_net_profit),
+        float(min_volume),
+        float(min_win_rate),
+        float(min_roi),
+        float(min_avg_trade_size),
+        float(min_largest_trade),
+        int(min_resolved),
+        bool(include_aggressive_traders),
+        bool(include_bots),
+        bool(st.session_state.get("fast_mode_results")),
+        int(max_wallets),
+    )
+    if whale_filter_reason != "preferred thresholds" and whale_filter_reason != "no usable data exists":
+        st.info(f"Showing ranked fallback: {whale_filter_reason}.")
 elif st.session_state.get("fast_mode_results"):
     filtered = [
         row for row in rows
@@ -1949,8 +2128,47 @@ if df.empty:
     st.stop()
 
 if whale_mode:
+    trending_df = trending_whales(filtered)
+    if not trending_df.empty:
+        render_section_header(
+            "Trending Whales",
+            "Recent Activity Spike",
+            "Wallets with unusually strong recent flow, weighted by volume and position size.",
+            right_html=badge("Hot tape", "green"),
+        )
+        trending_columns = [
+            "wallet",
+            "whale_tier",
+            "trend_score",
+            "recent_activity",
+            "total_volume",
+            "avg_trade_size",
+            "whale_score",
+            "why_ranked_highly",
+        ]
+        for column in trending_columns:
+            if column not in trending_df.columns:
+                trending_df[column] = None
+        st.dataframe(
+            style_financial_table(trending_df[trending_columns]),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "wallet": "Wallet",
+                "whale_tier": "Tier",
+                "trend_score": st.column_config.NumberColumn("Trend score", format="%.2f"),
+                "recent_activity": st.column_config.NumberColumn("Recent trades", format="%d"),
+                "total_volume": st.column_config.NumberColumn("Volume", format="$%.2f"),
+                "avg_trade_size": st.column_config.NumberColumn("Avg position", format="$%.2f"),
+                "whale_score": st.column_config.NumberColumn("Whale score", format="%.2f"),
+                "why_ranked_highly": "Why it is trending",
+            },
+        )
+
+if whale_mode:
     columns = [
         "wallet",
+        "whale_tier",
         "net_profit",
         "roi_pct",
         "win_rate",
@@ -1959,8 +2177,12 @@ if whale_mode:
         "avg_trade_size",
         "largest_trade",
         "resolved_markets",
+        "trade_count",
+        "recent_activity",
         "whale_score",
+        "bot_penalty",
         "bot_likeness_warning",
+        "why_ranked_highly",
     ]
 else:
     columns = [
@@ -1992,21 +2214,25 @@ ranking_event = st.dataframe(
     key="wallet_rankings_table",
     column_config={
         "wallet": "Wallet address",
+        "whale_tier": "Tier",
         "polygonscan_url": st.column_config.LinkColumn("Polygonscan", display_text="Open"),
         "polymarket_profile_url": st.column_config.LinkColumn("Polymarket", display_text="Open"),
         "adjusted_win_rate": st.column_config.NumberColumn("Adjusted win rate", format="%.2f%%"),
         "final_score": st.column_config.NumberColumn("Score", format="%.2f"),
         "whale_score": st.column_config.NumberColumn("Whale score", format="%.2f"),
+        "bot_penalty": st.column_config.NumberColumn("Bot penalty", format="%.2f"),
         "net_profit": st.column_config.NumberColumn("Net profit", format="$%.2f"),
         "roi_pct": st.column_config.NumberColumn("ROI %", format="%.2f%%"),
         "win_rate": st.column_config.NumberColumn("Win rate", format="%.2f%%"),
         "total_volume": st.column_config.NumberColumn("Total traded volume", format="$%.2f"),
         "avg_trade_size": st.column_config.NumberColumn("Average trade size", format="$%.2f"),
         "largest_trade": st.column_config.NumberColumn("Largest trade", format="$%.2f"),
+        "trade_count": st.column_config.NumberColumn("Trades", format="%d"),
         "trade_liquidity_proxy": st.column_config.NumberColumn("Trade liquidity proxy", format="$%.2f"),
         "unique_markets": st.column_config.NumberColumn("Unique markets", format="%d"),
         "recent_activity": st.column_config.NumberColumn("Recent activity", format="%d"),
         "bot_likeness_warning": "Bot-likeness warning",
+        "why_ranked_highly": "Why ranked highly",
     },
 )
 
@@ -2040,9 +2266,12 @@ st.download_button("Export results to CSV", csv, "whalewatch_wallet_rankings.csv
 with st.expander("How the score works"):
     st.markdown(
         """
-        Whale Mode uses normalized 0-100 inputs so large dollar values do not overpower everything:
+        Whale Mode uses normalized 0-100 inputs so one metric cannot overpower everything:
 
-        `Net Profit x 0.30 + Total Volume x 0.20 + ROI x 0.15 + Adjusted Win Rate x 0.15 + Average Trade Size x 0.10 + Copyability x 0.10`
+        `Profit x 0.30 + Win Rate x 0.25 + Volume x 0.20 + Position Sizing x 0.10 + Consistency x 0.10 + Activity Frequency x 0.05`
+
+        Bot-like behavior, repetitive same-size trades, tiny high-frequency flow, and concentrated one-off wins reduce the score.
+        Tiers are Kraken, Leviathan, Blue Whale, Shark, and Dolphin.
 
         Standard mode uses this reliability-adjusted ranking:
 

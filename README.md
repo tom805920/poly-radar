@@ -3,7 +3,7 @@
 A beginner-friendly Streamlit dashboard for ranking public Polymarket wallets that may be worth researching for copy-trading ideas.
 
 This is research-only software. It does not place trades, sign orders, request private keys, or connect to a wallet.
-Users must log in with Supabase Auth before using the dashboard. Watchlists, alert settings, and Whale Mode preference are stored per user.
+Users must log in with Firebase Authentication before using the dashboard. Watchlists, alert settings, and Whale Mode preference are stored per user in Firestore.
 
 ## What it does
 
@@ -74,100 +74,40 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Supabase Setup
+## Firebase Setup
 
-1. Create a project at [supabase.com](https://supabase.com).
-2. In **Authentication > Providers**, keep Email enabled.
-3. In the SQL editor, run this schema:
+1. Create a project in the [Firebase Console](https://console.firebase.google.com/).
+2. Go to **Authentication > Sign-in method** and enable **Email/Password**.
+3. Go to **Firestore Database** and create a database.
+4. Set Firestore security rules so users can only read and write their own data:
 
-```sql
-create extension if not exists pgcrypto;
+```text
+rules_version = '2';
 
-create table if not exists public.watchlists (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users(id) on delete cascade,
-  wallet_address text not null,
-  wallet_label text,
-  created_at timestamptz not null default now(),
-  unique (user_id, wallet_address)
-);
-
-create table if not exists public.user_settings (
-  user_id uuid primary key references auth.users(id) on delete cascade,
-  min_trade_size numeric not null default 250,
-  popup_alerts_enabled boolean not null default true,
-  whale_mode_enabled boolean not null default true,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-
-create or replace function public.set_updated_at()
-returns trigger
-language plpgsql
-as $$
-begin
-  new.updated_at = now();
-  return new;
-end;
-$$;
-
-drop trigger if exists set_user_settings_updated_at on public.user_settings;
-create trigger set_user_settings_updated_at
-before update on public.user_settings
-for each row execute function public.set_updated_at();
-
-alter table public.watchlists enable row level security;
-alter table public.user_settings enable row level security;
-
-grant select, insert, update, delete on table public.watchlists to authenticated;
-grant select, insert, update, delete on table public.user_settings to authenticated;
-
-create policy "Users can view their own watchlists"
-on public.watchlists for select
-to authenticated
-using ((select auth.uid()) = user_id);
-
-create policy "Users can insert their own watchlists"
-on public.watchlists for insert
-to authenticated
-with check ((select auth.uid()) = user_id);
-
-create policy "Users can update their own watchlists"
-on public.watchlists for update
-to authenticated
-using ((select auth.uid()) = user_id)
-with check ((select auth.uid()) = user_id);
-
-create policy "Users can delete their own watchlists"
-on public.watchlists for delete
-to authenticated
-using ((select auth.uid()) = user_id);
-
-create policy "Users can view their own settings"
-on public.user_settings for select
-to authenticated
-using ((select auth.uid()) = user_id);
-
-create policy "Users can insert their own settings"
-on public.user_settings for insert
-to authenticated
-with check ((select auth.uid()) = user_id);
-
-create policy "Users can update their own settings"
-on public.user_settings for update
-to authenticated
-using ((select auth.uid()) = user_id)
-with check ((select auth.uid()) = user_id);
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId}/{document=**} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}
 ```
 
-4. Create `.streamlit/secrets.toml` in this project folder:
+5. Create `.streamlit/secrets.toml` in this project folder:
 
 ```toml
-SUPABASE_URL = "https://your-project-ref.supabase.co"
-SUPABASE_ANON_KEY = "your-supabase-anon-or-publishable-key"
+FIREBASE_WEB_API_KEY = "your-firebase-web-api-key"
+FIREBASE_PROJECT_ID = "your-firebase-project-id"
 ```
 
-Use the project URL and anon/publishable key from **Project Settings > API**. Do not add service-role keys, private keys, seed phrases, or trading credentials.
+Find the Web API key in **Project settings > General > Web API Key**. Use the Firebase project ID from the same settings page. Do not add service account files, private keys, seed phrases, or trading credentials.
+
+Poly Radar stores user data in these Firestore paths:
+
+```text
+users/{user_id}/watchlist/{wallet_address}
+users/{user_id}/settings/main
+```
 
 ## Run
 
@@ -210,6 +150,6 @@ app.py                    Streamlit dashboard
 polymarket_tracker/api.py Public API client
 polymarket_tracker/db.py  SQLite cache
 polymarket_tracker/metrics.py Scoring and filters
-polymarket_tracker/supabase_store.py Supabase auth and per-user storage
+polymarket_tracker/firebase_store.py Firebase auth and per-user storage
 requirements.txt          Python dependencies
 ```

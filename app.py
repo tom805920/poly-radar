@@ -27,11 +27,11 @@ from polymarket_tracker.metrics import (
     repetitive_size_ratio,
     score_wallet,
 )
-from polymarket_tracker.supabase_store import (
+from polymarket_tracker.firebase_store import (
     DEFAULT_USER_SETTINGS,
-    SUPABASE_CONNECTION_ERROR,
-    SupabaseError,
-    SupabaseStore,
+    FIREBASE_CONNECTION_ERROR,
+    FirebaseError,
+    FirebaseStore,
 )
 
 
@@ -53,32 +53,32 @@ def db_connection():
     return connect()
 
 
-def read_supabase_secrets() -> tuple[str, str] | None:
+def read_firebase_secrets() -> tuple[str, str] | None:
     try:
-        url = str(st.secrets["SUPABASE_URL"]).strip().rstrip("/")
-        anon_key = str(st.secrets["SUPABASE_ANON_KEY"]).strip()
+        api_key = str(st.secrets["FIREBASE_WEB_API_KEY"]).strip()
+        project_id = str(st.secrets["FIREBASE_PROJECT_ID"]).strip()
     except Exception:
         return None
-    if not url or not anon_key:
+    if not api_key or not project_id:
         return None
-    return url, anon_key
+    return api_key, project_id
 
 
 @st.cache_resource
-def supabase_store(url: str, anon_key: str) -> SupabaseStore:
-    return SupabaseStore(url, anon_key)
+def firebase_store(api_key: str, project_id: str) -> FirebaseStore:
+    return FirebaseStore(api_key, project_id)
 
 
-def get_supabase_store() -> SupabaseStore | None:
-    config = read_supabase_secrets()
+def get_firebase_store() -> FirebaseStore | None:
+    config = read_firebase_secrets()
     if not config:
         return None
-    return supabase_store(*config)
+    return firebase_store(*config)
 
 
-def show_supabase_error(action: str, exc: SupabaseError) -> None:
-    if exc.status_code is None and str(exc) == SUPABASE_CONNECTION_ERROR:
-        st.error(SUPABASE_CONNECTION_ERROR)
+def show_firebase_error(action: str, exc: FirebaseError) -> None:
+    if exc.status_code is None and str(exc) == FIREBASE_CONNECTION_ERROR:
+        st.error(FIREBASE_CONNECTION_ERROR)
     else:
         st.error(f"{action} failed: {exc}")
 
@@ -101,46 +101,42 @@ def reset_user_runtime_state() -> None:
 
 
 def save_auth_session(session) -> None:
-    st.session_state["supabase_session"] = session.to_dict()
+    st.session_state["firebase_session"] = session.to_dict()
 
 
 def current_auth_session() -> dict | None:
-    session = st.session_state.get("supabase_session")
-    if not session or not session.get("access_token") or not session.get("user_id"):
+    session = st.session_state.get("firebase_session")
+    if not session or not session.get("id_token") or not session.get("user_id"):
         return None
     if int(session.get("expires_at") or 0) <= int(time.time()) + 60:
         refresh_token = session.get("refresh_token")
-        store = get_supabase_store()
+        store = get_firebase_store()
         if not refresh_token or not store:
-            st.session_state.pop("supabase_session", None)
+            st.session_state.pop("firebase_session", None)
             return None
         try:
             refreshed = store.refresh_session(str(refresh_token))
-        except SupabaseError:
-            logger.warning("Could not refresh Supabase session", exc_info=True)
-            st.session_state.pop("supabase_session", None)
+        except FirebaseError:
+            logger.warning("Could not refresh Firebase session", exc_info=True)
+            st.session_state.pop("firebase_session", None)
             return None
-        save_auth_session(refreshed)
-        session = st.session_state["supabase_session"]
+        refreshed_session = refreshed.to_dict()
+        if not refreshed_session.get("email"):
+            refreshed_session["email"] = session.get("email", "")
+        st.session_state["firebase_session"] = refreshed_session
+        session = st.session_state["firebase_session"]
     return session
 
 
 def render_auth_page() -> None:
     st.title("Poly Radar")
     st.caption("Sign in to keep your watchlist, alerts, and settings private to your account.")
-    store = get_supabase_store()
+    store = get_firebase_store()
     if not store:
-        st.error("Supabase is not configured. Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit secrets.")
+        st.error("Firebase is not configured. Add FIREBASE_WEB_API_KEY and FIREBASE_PROJECT_ID to Streamlit secrets.")
         st.stop()
 
-    st.caption(f"Supabase URL: `{store.url}`")
-    if st.button("Test Supabase connection"):
-        try:
-            store.test_connection()
-        except SupabaseError as exc:
-            show_supabase_error("Supabase connection test", exc)
-        else:
-            st.success("Supabase connection looks good.")
+    st.caption(f"Firebase project: `{store.project_id}`")
 
     login_tab, signup_tab = st.tabs(["Log in", "Sign up"])
     with login_tab:
@@ -154,8 +150,8 @@ def render_auth_page() -> None:
                 st.stop()
             try:
                 session = store.sign_in(email.strip(), password)
-            except SupabaseError as exc:
-                show_supabase_error("Login", exc)
+            except FirebaseError as exc:
+                show_firebase_error("Login", exc)
             else:
                 reset_user_runtime_state()
                 save_auth_session(session)
@@ -172,34 +168,27 @@ def render_auth_page() -> None:
                 st.stop()
             try:
                 session = store.sign_up(signup_email.strip(), signup_password)
-            except SupabaseError as exc:
-                show_supabase_error("Signup", exc)
+            except FirebaseError as exc:
+                show_firebase_error("Signup", exc)
             else:
-                if session:
-                    reset_user_runtime_state()
-                    save_auth_session(session)
-                    st.rerun()
-                else:
-                    st.success("Account created. Check your email to confirm it, then log in.")
+                reset_user_runtime_state()
+                save_auth_session(session)
+                st.rerun()
 
 
 def sign_out() -> None:
-    store = get_supabase_store()
-    session = current_auth_session()
-    if store and session:
-        try:
-            store.logout(str(session["access_token"]))
-        except SupabaseError:
-            logger.warning("Supabase logout request failed", exc_info=True)
-    st.session_state.pop("supabase_session", None)
+    store = get_firebase_store()
+    if store:
+        store.logout()
+    st.session_state.pop("firebase_session", None)
     st.session_state.pop("loaded_user_id", None)
     reset_user_runtime_state()
     st.rerun()
 
 
-def sync_user_data_from_supabase(force: bool = False) -> None:
+def sync_user_data_from_firebase(force: bool = False) -> None:
     session = current_auth_session()
-    store = get_supabase_store()
+    store = get_firebase_store()
     if not session or not store:
         return
     user_id = str(session["user_id"])
@@ -207,11 +196,11 @@ def sync_user_data_from_supabase(force: bool = False) -> None:
         ensure_watchlist_state()
         return
     try:
-        st.session_state["watchlist_items"] = store.fetch_watchlist(str(session["access_token"]), user_id)
-        st.session_state["user_settings"] = store.fetch_user_settings(str(session["access_token"]), user_id)
+        st.session_state["watchlist_items"] = store.fetch_watchlist(str(session["id_token"]), user_id)
+        st.session_state["user_settings"] = store.fetch_user_settings(str(session["id_token"]), user_id)
         st.session_state["loaded_user_id"] = user_id
-    except SupabaseError as exc:
-        st.error(f"Could not load your Supabase data: {exc}")
+    except FirebaseError as exc:
+        st.error(f"Could not load your Firebase data: {exc}")
         st.stop()
     ensure_watchlist_state()
 
@@ -234,17 +223,17 @@ def add_wallet_to_watchlist(wallet: str, row: dict | None = None) -> None:
     wallet = wallet.lower()
     ensure_watchlist_state()
     session = current_auth_session()
-    store = get_supabase_store()
+    store = get_firebase_store()
     if not session or not store:
         st.error("Log in before adding wallets to your watchlist.")
         return
     try:
         saved_items = store.upsert_watchlist(
-            str(session["access_token"]),
+            str(session["id_token"]),
             str(session["user_id"]),
             wallet,
         )
-    except SupabaseError as exc:
+    except FirebaseError as exc:
         st.error(f"Could not add wallet to watchlist: {exc}")
         return
     existing = {item["wallet"].lower(): item for item in st.session_state["watchlist_items"]}
@@ -267,13 +256,13 @@ def remove_wallet_from_watchlist(wallet: str) -> None:
     wallet = wallet.lower()
     ensure_watchlist_state()
     session = current_auth_session()
-    store = get_supabase_store()
+    store = get_firebase_store()
     if not session or not store:
         st.error("Log in before changing your watchlist.")
         return
     try:
-        store.delete_watchlist_wallet(str(session["access_token"]), str(session["user_id"]), wallet)
-    except SupabaseError as exc:
+        store.delete_watchlist_wallet(str(session["id_token"]), str(session["user_id"]), wallet)
+    except FirebaseError as exc:
         st.error(f"Could not remove wallet from watchlist: {exc}")
         return
     st.session_state["watchlist_items"] = [
@@ -297,17 +286,17 @@ def update_user_settings(**updates) -> None:
     if not changed:
         return
     session = current_auth_session()
-    store = get_supabase_store()
+    store = get_firebase_store()
     if not session or not store:
         return
     updated = {**current, **updates}
     try:
         st.session_state["user_settings"] = store.upsert_user_settings(
-            str(session["access_token"]),
+            str(session["id_token"]),
             str(session["user_id"]),
             updated,
         )
-    except SupabaseError as exc:
+    except FirebaseError as exc:
         st.warning(f"Could not save settings: {exc}")
 
 
@@ -1079,7 +1068,7 @@ def render_watchlist_page(ranked_df: pd.DataFrame | None = None, whale_mode: boo
 
     if st.button("Refresh Watchlist Trades"):
         cached_wallet_recent_trades.clear()
-        sync_user_data_from_supabase(force=True)
+        sync_user_data_from_firebase(force=True)
         st.rerun()
 
     ranked_lookup = {}
@@ -1115,7 +1104,7 @@ if not current_auth_session():
     render_auth_page()
     st.stop()
 
-sync_user_data_from_supabase()
+sync_user_data_from_firebase()
 auth_session = current_auth_session()
 settings_state = user_settings()
 

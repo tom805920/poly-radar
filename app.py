@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import time
 import logging
-import json
 from dataclasses import dataclass
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -29,6 +27,7 @@ from polymarket_tracker.metrics import (
     repetitive_size_ratio,
     score_wallet,
 )
+from polymarket_tracker.supabase_store import DEFAULT_USER_SETTINGS, SupabaseError, SupabaseStore
 
 
 st.set_page_config(page_title="Poly Radar", layout="wide")
@@ -38,7 +37,6 @@ MAX_RECENT_TRADES_FAST = 1000
 MAX_WALLETS_FAST = 50
 MAX_API_CALLS_PER_RUN = 100
 MAX_RUN_SECONDS = 60
-WATCHLIST_PATH = Path("watchlist.json")
 
 
 def api_client() -> PolymarketClient:
@@ -50,33 +48,152 @@ def db_connection():
     return connect()
 
 
-def load_watchlist_file() -> list[dict]:
-    if not WATCHLIST_PATH.exists():
-        return []
+def read_supabase_secrets() -> tuple[str, str] | None:
     try:
-        with WATCHLIST_PATH.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        logger.warning("Could not read watchlist.json", exc_info=True)
-        return []
-    if isinstance(payload, list):
-        if payload and isinstance(payload[0], str):
-            return [{"wallet": wallet} for wallet in payload]
-        return [item for item in payload if isinstance(item, dict) and item.get("wallet")]
-    return []
+        return str(st.secrets["SUPABASE_URL"]), str(st.secrets["SUPABASE_ANON_KEY"])
+    except Exception:
+        return None
 
 
-def save_watchlist_file(items: list[dict]) -> None:
+@st.cache_resource
+def supabase_store(url: str, anon_key: str) -> SupabaseStore:
+    return SupabaseStore(url, anon_key)
+
+
+def get_supabase_store() -> SupabaseStore | None:
+    config = read_supabase_secrets()
+    if not config:
+        return None
+    return supabase_store(*config)
+
+
+def reset_user_runtime_state() -> None:
+    for key in [
+        "watchlist_items",
+        "watchlist",
+        "seen_trade_ids",
+        "seen_trade_timestamps",
+        "watchlist_alert_wallets_initialized",
+        "new_trade_alerts",
+        "user_settings",
+        "rows",
+        "discovered_wallets",
+        "recent_trades",
+        "selected_wallet",
+    ]:
+        st.session_state.pop(key, None)
+
+
+def save_auth_session(session) -> None:
+    st.session_state["supabase_session"] = session.to_dict()
+
+
+def current_auth_session() -> dict | None:
+    session = st.session_state.get("supabase_session")
+    if not session or not session.get("access_token") or not session.get("user_id"):
+        return None
+    if int(session.get("expires_at") or 0) <= int(time.time()) + 60:
+        refresh_token = session.get("refresh_token")
+        store = get_supabase_store()
+        if not refresh_token or not store:
+            st.session_state.pop("supabase_session", None)
+            return None
+        try:
+            refreshed = store.refresh_session(str(refresh_token))
+        except SupabaseError:
+            logger.warning("Could not refresh Supabase session", exc_info=True)
+            st.session_state.pop("supabase_session", None)
+            return None
+        save_auth_session(refreshed)
+        session = st.session_state["supabase_session"]
+    return session
+
+
+def render_auth_page() -> None:
+    st.title("Poly Radar")
+    st.caption("Sign in to keep your watchlist, alerts, and settings private to your account.")
+    store = get_supabase_store()
+    if not store:
+        st.error("Supabase is not configured. Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit secrets.")
+        st.stop()
+
+    login_tab, signup_tab = st.tabs(["Log in", "Sign up"])
+    with login_tab:
+        with st.form("login-form"):
+            email = st.text_input("Email", key="login-email")
+            password = st.text_input("Password", type="password", key="login-password")
+            submitted = st.form_submit_button("Log in", type="primary")
+        if submitted:
+            if not email.strip() or not password:
+                st.error("Enter both email and password.")
+                st.stop()
+            try:
+                session = store.sign_in(email.strip(), password)
+            except SupabaseError as exc:
+                st.error(f"Login failed: {exc}")
+            else:
+                reset_user_runtime_state()
+                save_auth_session(session)
+                st.rerun()
+
+    with signup_tab:
+        with st.form("signup-form"):
+            signup_email = st.text_input("Email", key="signup-email")
+            signup_password = st.text_input("Password", type="password", key="signup-password")
+            signup_submitted = st.form_submit_button("Create account")
+        if signup_submitted:
+            if not signup_email.strip() or not signup_password:
+                st.error("Enter both email and password.")
+                st.stop()
+            try:
+                session = store.sign_up(signup_email.strip(), signup_password)
+            except SupabaseError as exc:
+                st.error(f"Signup failed: {exc}")
+            else:
+                if session:
+                    reset_user_runtime_state()
+                    save_auth_session(session)
+                    st.rerun()
+                else:
+                    st.success("Account created. Check your email to confirm it, then log in.")
+
+
+def sign_out() -> None:
+    store = get_supabase_store()
+    session = current_auth_session()
+    if store and session:
+        try:
+            store.logout(str(session["access_token"]))
+        except SupabaseError:
+            logger.warning("Supabase logout request failed", exc_info=True)
+    st.session_state.pop("supabase_session", None)
+    st.session_state.pop("loaded_user_id", None)
+    reset_user_runtime_state()
+    st.rerun()
+
+
+def sync_user_data_from_supabase(force: bool = False) -> None:
+    session = current_auth_session()
+    store = get_supabase_store()
+    if not session or not store:
+        return
+    user_id = str(session["user_id"])
+    if not force and st.session_state.get("loaded_user_id") == user_id:
+        ensure_watchlist_state()
+        return
     try:
-        with WATCHLIST_PATH.open("w", encoding="utf-8") as handle:
-            json.dump(items, handle, indent=2)
-    except OSError:
-        logger.warning("Could not write watchlist.json", exc_info=True)
+        st.session_state["watchlist_items"] = store.fetch_watchlist(str(session["access_token"]), user_id)
+        st.session_state["user_settings"] = store.fetch_user_settings(str(session["access_token"]), user_id)
+        st.session_state["loaded_user_id"] = user_id
+    except SupabaseError as exc:
+        st.error(f"Could not load your Supabase data: {exc}")
+        st.stop()
+    ensure_watchlist_state()
 
 
 def ensure_watchlist_state() -> None:
     if "watchlist_items" not in st.session_state:
-        st.session_state["watchlist_items"] = load_watchlist_file()
+        st.session_state["watchlist_items"] = []
     st.session_state["watchlist"] = [
         str(item.get("wallet", "")).lower()
         for item in st.session_state["watchlist_items"]
@@ -91,8 +208,22 @@ def ensure_watchlist_state() -> None:
 def add_wallet_to_watchlist(wallet: str, row: dict | None = None) -> None:
     wallet = wallet.lower()
     ensure_watchlist_state()
+    session = current_auth_session()
+    store = get_supabase_store()
+    if not session or not store:
+        st.error("Log in before adding wallets to your watchlist.")
+        return
+    try:
+        saved_items = store.upsert_watchlist(
+            str(session["access_token"]),
+            str(session["user_id"]),
+            wallet,
+        )
+    except SupabaseError as exc:
+        st.error(f"Could not add wallet to watchlist: {exc}")
+        return
     existing = {item["wallet"].lower(): item for item in st.session_state["watchlist_items"]}
-    item = existing.get(wallet, {"wallet": wallet})
+    item = saved_items[0] if saved_items else existing.get(wallet, {"wallet": wallet})
     if row:
         item.update(
             {
@@ -102,16 +233,24 @@ def add_wallet_to_watchlist(wallet: str, row: dict | None = None) -> None:
                 "roi_pct": row.get("roi_pct"),
             }
         )
-    item["added_at"] = int(time.time())
     existing[wallet] = item
     st.session_state["watchlist_items"] = list(existing.values())
-    save_watchlist_file(st.session_state["watchlist_items"])
     ensure_watchlist_state()
 
 
 def remove_wallet_from_watchlist(wallet: str) -> None:
     wallet = wallet.lower()
     ensure_watchlist_state()
+    session = current_auth_session()
+    store = get_supabase_store()
+    if not session or not store:
+        st.error("Log in before changing your watchlist.")
+        return
+    try:
+        store.delete_watchlist_wallet(str(session["access_token"]), str(session["user_id"]), wallet)
+    except SupabaseError as exc:
+        st.error(f"Could not remove wallet from watchlist: {exc}")
+        return
     st.session_state["watchlist_items"] = [
         item for item in st.session_state["watchlist_items"] if str(item.get("wallet", "")).lower() != wallet
     ]
@@ -120,8 +259,31 @@ def remove_wallet_from_watchlist(wallet: str) -> None:
         for item in st.session_state.get("watchlist_alert_wallets_initialized", [])
         if str(item).lower() != wallet
     ]
-    save_watchlist_file(st.session_state["watchlist_items"])
     ensure_watchlist_state()
+
+
+def user_settings() -> dict:
+    return {**DEFAULT_USER_SETTINGS, **st.session_state.get("user_settings", {})}
+
+
+def update_user_settings(**updates) -> None:
+    current = user_settings()
+    changed = any(current.get(key) != value for key, value in updates.items())
+    if not changed:
+        return
+    session = current_auth_session()
+    store = get_supabase_store()
+    if not session or not store:
+        return
+    updated = {**current, **updates}
+    try:
+        st.session_state["user_settings"] = store.upsert_user_settings(
+            str(session["access_token"]),
+            str(session["user_id"]),
+            updated,
+        )
+    except SupabaseError as exc:
+        st.warning(f"Could not save settings: {exc}")
 
 
 @dataclass
@@ -860,9 +1022,7 @@ def render_watchlist_page(ranked_df: pd.DataFrame | None = None, whale_mode: boo
     st.subheader("Watchlist")
     ensure_watchlist_state()
     watchlist_items = st.session_state["watchlist_items"]
-    if not watchlist_items:
-        st.info("No wallets in watchlist yet. Add wallets from the dashboard.")
-        return
+    settings_state = user_settings()
 
     controls = st.columns([1, 1, 1, 1])
     auto_refresh = controls[0].checkbox("Auto-refresh Watchlist", value=True)
@@ -872,17 +1032,29 @@ def render_watchlist_page(ranked_df: pd.DataFrame | None = None, whale_mode: boo
         index=0,
         format_func=lambda seconds: f"{seconds} seconds",
     )
-    enable_popup_alerts = controls[2].checkbox("Enable popup alerts", value=True)
+    enable_popup_alerts = controls[2].checkbox(
+        "Enable popup alerts",
+        value=bool(settings_state["popup_alerts_enabled"]),
+    )
     alert_min_trade_value = controls[3].number_input(
         "Alert minimum trade size ($)",
         min_value=0.0,
-        value=250.0,
+        value=float(settings_state["min_trade_size"]),
         step=50.0,
+    )
+    update_user_settings(
+        min_trade_size=float(alert_min_trade_value),
+        popup_alerts_enabled=bool(enable_popup_alerts),
     )
     play_sound = st.checkbox("Play subtle sound", value=False)
 
+    if not watchlist_items:
+        st.info("No wallets in watchlist yet. Add wallets from the dashboard.")
+        return
+
     if st.button("Refresh Watchlist Trades"):
         cached_wallet_recent_trades.clear()
+        sync_user_data_from_supabase(force=True)
         st.rerun()
 
     ranked_lookup = {}
@@ -914,15 +1086,25 @@ def render_watchlist_page(ranked_df: pd.DataFrame | None = None, whale_mode: boo
         )
 
 
-ensure_watchlist_state()
+if not current_auth_session():
+    render_auth_page()
+    st.stop()
+
+sync_user_data_from_supabase()
+auth_session = current_auth_session()
+settings_state = user_settings()
 
 st.title("Poly Radar")
 st.caption("Ranks public wallets for research only. This app never places trades or asks for private keys.")
 
 with st.sidebar:
+    st.caption(f"Logged in as {auth_session.get('email', 'unknown') if auth_session else 'unknown'}")
+    if st.button("Logout"):
+        sign_out()
     page = st.radio("Page", ["Dashboard", "Wallet Details", "Watchlist"])
     st.header("Discovery")
-    whale_mode = st.checkbox("Whale Mode", value=True)
+    whale_mode = st.checkbox("Whale Mode", value=bool(settings_state["whale_mode_enabled"]))
+    update_user_settings(whale_mode_enabled=bool(whale_mode))
     fast_mode = st.checkbox("Fast Mode", value=not whale_mode)
     market_category = st.selectbox("Market category", list(CATEGORY_KEYWORDS.keys()))
     time_period_days = st.selectbox("Time period", [30, 90, 180], index=1, format_func=lambda d: f"Last {d} days")

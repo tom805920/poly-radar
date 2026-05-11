@@ -3,6 +3,7 @@
 A beginner-friendly Streamlit dashboard for ranking public Polymarket wallets that may be worth researching for copy-trading ideas.
 
 This is research-only software. It does not place trades, sign orders, request private keys, or connect to a wallet.
+Users must log in with Supabase Auth before using the dashboard. Watchlists, alert settings, and Whale Mode preference are stored per user.
 
 ## What it does
 
@@ -37,7 +38,7 @@ Adjusted Win Rate is `(wallet wins + 5) / (wallet resolved markets + 10)` so sma
 - Filters out wallets with too few resolved markets, negative profit, low ROI, low win rate, low volume, one lucky big win, or weak trade-data liquidity quality.
 - Exports the ranked table to CSV.
 - Lets you click/select a ranked wallet to inspect recent trades, market links, open/resolved status, and trade details.
-- Includes a read-only copy watchlist that can refresh every 30 or 60 seconds, highlight trades from whale wallets, and show optional popup alerts for new watched-wallet trades.
+- Includes a private read-only copy watchlist that can refresh every 30 or 60 seconds, highlight trades from whale wallets, and show optional popup alerts for new watched-wallet trades.
 - Caches API results in SQLite at `data/polymarket_tracker.sqlite`.
 
 ## Data sources
@@ -73,6 +74,101 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+## Supabase Setup
+
+1. Create a project at [supabase.com](https://supabase.com).
+2. In **Authentication > Providers**, keep Email enabled.
+3. In the SQL editor, run this schema:
+
+```sql
+create extension if not exists pgcrypto;
+
+create table if not exists public.watchlists (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  wallet_address text not null,
+  wallet_label text,
+  created_at timestamptz not null default now(),
+  unique (user_id, wallet_address)
+);
+
+create table if not exists public.user_settings (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  min_trade_size numeric not null default 250,
+  popup_alerts_enabled boolean not null default true,
+  whale_mode_enabled boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create or replace function public.set_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists set_user_settings_updated_at on public.user_settings;
+create trigger set_user_settings_updated_at
+before update on public.user_settings
+for each row execute function public.set_updated_at();
+
+alter table public.watchlists enable row level security;
+alter table public.user_settings enable row level security;
+
+grant select, insert, update, delete on table public.watchlists to authenticated;
+grant select, insert, update, delete on table public.user_settings to authenticated;
+
+create policy "Users can view their own watchlists"
+on public.watchlists for select
+to authenticated
+using ((select auth.uid()) = user_id);
+
+create policy "Users can insert their own watchlists"
+on public.watchlists for insert
+to authenticated
+with check ((select auth.uid()) = user_id);
+
+create policy "Users can update their own watchlists"
+on public.watchlists for update
+to authenticated
+using ((select auth.uid()) = user_id)
+with check ((select auth.uid()) = user_id);
+
+create policy "Users can delete their own watchlists"
+on public.watchlists for delete
+to authenticated
+using ((select auth.uid()) = user_id);
+
+create policy "Users can view their own settings"
+on public.user_settings for select
+to authenticated
+using ((select auth.uid()) = user_id);
+
+create policy "Users can insert their own settings"
+on public.user_settings for insert
+to authenticated
+with check ((select auth.uid()) = user_id);
+
+create policy "Users can update their own settings"
+on public.user_settings for update
+to authenticated
+using ((select auth.uid()) = user_id)
+with check ((select auth.uid()) = user_id);
+```
+
+4. Create `.streamlit/secrets.toml` in this project folder:
+
+```toml
+SUPABASE_URL = "https://your-project-ref.supabase.co"
+SUPABASE_ANON_KEY = "your-supabase-anon-or-publishable-key"
+```
+
+Use the project URL and anon/publishable key from **Project Settings > API**. Do not add service-role keys, private keys, seed phrases, or trading credentials.
+
 ## Run
 
 ```powershell
@@ -83,10 +179,11 @@ Streamlit will print a local URL, usually `http://localhost:8501`.
 
 ## How to use
 
-1. Choose a category and time period in the sidebar.
-2. Click **Discover Wallets** to scan recent public trades for active candidate wallets.
-3. Optionally paste known wallets and click **Analyze manual wallets**.
-4. Keep Whale Mode on for a stricter first pass:
+1. Sign up or log in with email and password.
+2. Choose a category and time period in the sidebar.
+3. Click **Discover Wallets** to scan recent public trades for active candidate wallets.
+4. Optionally paste known wallets and click **Analyze manual wallets**.
+5. Keep Whale Mode on for a stricter first pass:
    - minimum $25,000 total volume
    - minimum $2,000 net profit
    - minimum $250 average trade size
@@ -94,8 +191,9 @@ Streamlit will print a local URL, usually `http://localhost:8501`.
    - minimum 50 resolved markets
    - exclude one lucky big win
    - exclude tiny, repetitive, bot-like trade patterns
-5. Review the ranked dashboard table.
-6. Click **Export results to CSV** if you want the results in a spreadsheet.
+6. Review the ranked dashboard table.
+7. Add wallets to your private watchlist.
+8. Click **Export results to CSV** if you want the results in a spreadsheet.
 
 ## Notes for beginners
 
@@ -112,5 +210,6 @@ app.py                    Streamlit dashboard
 polymarket_tracker/api.py Public API client
 polymarket_tracker/db.py  SQLite cache
 polymarket_tracker/metrics.py Scoring and filters
+polymarket_tracker/supabase_store.py Supabase auth and per-user storage
 requirements.txt          Python dependencies
 ```

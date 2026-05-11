@@ -293,6 +293,59 @@ def inject_whalewatch_theme() -> None:
             font-size: 0.92rem;
         }
 
+        .ww-wallet-address.compact {
+            font-size: 0.78rem;
+            color: #dbeafe;
+        }
+
+        .ww-wallet-inline {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.55rem;
+            min-width: 0;
+        }
+
+        .ww-compact-title-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            margin: 0.65rem 0 0.6rem;
+        }
+
+        .ww-compact-title {
+            color: var(--ww-text);
+            font-size: clamp(1.25rem, 2vw, 1.75rem);
+            font-weight: 900;
+            letter-spacing: 0;
+        }
+
+        .ww-watchlist-head {
+            color: var(--ww-muted);
+            font-size: 0.72rem;
+            font-weight: 900;
+            text-transform: uppercase;
+            border-bottom: 1px solid var(--ww-border);
+            padding-bottom: 0.25rem;
+            margin-top: 0.25rem;
+        }
+
+        .ww-alert-row {
+            border: 1px solid var(--ww-border);
+            background: rgba(10, 17, 30, 0.74);
+            border-radius: 8px;
+            padding: 0.65rem 0.75rem;
+            margin: 0.45rem 0;
+        }
+
+        .ww-alert-market {
+            color: var(--ww-text);
+            font-weight: 800;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
         .ww-wallet-table-wrap {
             width: 100%;
             overflow-x: auto;
@@ -590,6 +643,18 @@ def render_section_header(title: str, eyebrow: str = "", copy: str = "", right_h
     )
 
 
+def render_compact_title(title: str, right_html: str = "") -> None:
+    st.markdown(
+        f"""
+        <div class="ww-compact-title-row">
+          <div class="ww-compact-title">{html.escape(title)}</div>
+          <div>{right_html}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_metric_card(label: str, value: str, note: str = "", accent: str = "blue") -> None:
     st.markdown(
         f"""
@@ -671,6 +736,11 @@ def style_financial_table(table_df: pd.DataFrame):
             lambda _value: "font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.78rem;",
             subset=["wallet"],
         )
+    if "wallet_label" in table_df.columns:
+        styled = styled.map(
+            lambda _value: "font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.78rem;",
+            subset=["wallet_label"],
+        )
     return styled
 
 
@@ -697,6 +767,51 @@ def tier_class(tier: str) -> str:
 def tier_html(tier: str) -> str:
     safe_tier = html.escape(str(tier or "Dolphin"))
     return f'<span class="ww-tier ww-tier-{tier_class(safe_tier)}">{safe_tier}</span>'
+
+
+TIER_NAMES = {"Kraken", "Leviathan", "Blue Whale", "Shark", "Dolphin"}
+
+
+def normalize_tier_name(value) -> str:
+    text = str(value or "").strip()
+    for tier in TIER_NAMES:
+        if text.lower() == tier.lower():
+            return tier
+    return "Dolphin"
+
+
+def watchlist_item_map() -> dict[str, dict]:
+    return {
+        str(item.get("wallet", "")).lower(): item
+        for item in st.session_state.get("watchlist_items", [])
+        if item.get("wallet")
+    }
+
+
+def wallet_tier(wallet: str, ranked_lookup: dict[str, dict] | None = None) -> str:
+    wallet_key = str(wallet or "").lower()
+    ranked_lookup = ranked_lookup or {}
+    ranked_row = ranked_lookup.get(wallet_key, {})
+    item = watchlist_item_map().get(wallet_key, {})
+    return normalize_tier_name(
+        ranked_row.get("whale_tier")
+        or item.get("whale_tier")
+        or item.get("wallet_label")
+    )
+
+
+def wallet_label_text(wallet: str, ranked_lookup: dict[str, dict] | None = None) -> str:
+    wallet = str(wallet or "")
+    return f"[{wallet_tier(wallet, ranked_lookup)}] {wallet}"
+
+
+def wallet_badge_html(wallet: str, ranked_lookup: dict[str, dict] | None = None) -> str:
+    wallet = str(wallet or "")
+    tier = wallet_tier(wallet, ranked_lookup)
+    return (
+        f'<span class="ww-wallet-inline">{tier_html(tier)}'
+        f'<span class="ww-wallet-address compact">{html.escape(wallet)}</span></span>'
+    )
 
 
 def short_wallet(wallet: str) -> str:
@@ -964,6 +1079,7 @@ def add_wallet_to_watchlist(wallet: str, row: dict | None = None) -> None:
             str(session["id_token"]),
             str(session["user_id"]),
             wallet,
+            wallet_label=normalize_tier_name(row.get("whale_tier")) if row else None,
         )
     except FirebaseError:
         logger.warning("Could not add wallet to watchlist", exc_info=True)
@@ -978,6 +1094,7 @@ def add_wallet_to_watchlist(wallet: str, row: dict | None = None) -> None:
                 "whale_score": row.get("whale_score"),
                 "net_profit": row.get("net_profit"),
                 "roi_pct": row.get("roi_pct"),
+                "whale_tier": normalize_tier_name(row.get("whale_tier")),
             }
         )
     existing[wallet] = item
@@ -1548,8 +1665,7 @@ def render_selected_wallet_panel(selected_wallet: str, selected_metadata: dict |
           <div class="ww-brand-row">
             <div>
               <div class="ww-eyebrow">Selected Wallet</div>
-              <div style="margin: 0.35rem 0;">{tier_html(tier)}</div>
-              <div class="ww-wallet-address">{html.escape(selected_wallet)}</div>
+              <div style="margin: 0.35rem 0;">{wallet_badge_html(selected_wallet, {selected_wallet.lower(): selected_metadata})}</div>
             </div>
             <div class="ww-pill-row">{''.join(badge(item, "green" if item in ("Strong ROI", "High Win Rate", "Consistent") else "blue") for item in signals[:3])}</div>
           </div>
@@ -1685,19 +1801,29 @@ def latest_trade_time(wallet: str) -> str:
     return pd.to_datetime(timestamp, unit="s", utc=True).strftime("%Y-%m-%d %H:%M UTC") if timestamp else ""
 
 
-def render_wallet_trade_viewer(wallet_options: list[str], selected_wallet: str | None = None) -> None:
-    render_section_header(
-        "Wallet Detail View",
-        "Trade Tape",
-        "Inspect recent public fills, market status, and position flow for a selected wallet.",
-        right_html=f'{badge("Read-only", "green")}',
-    )
+def render_wallet_trade_viewer(
+    wallet_options: list[str],
+    selected_wallet: str | None = None,
+    ranked_lookup: dict[str, dict] | None = None,
+    require_watchlist: bool = False,
+) -> None:
+    ranked_lookup = ranked_lookup or {}
+    wallet_options = list(dict.fromkeys(str(wallet).lower() for wallet in wallet_options if wallet))
+    selected_wallet = str(selected_wallet or "").lower()
+
+    render_compact_title("Wallet Details", badge("Read-only", "green"))
+
+    if require_watchlist and not wallet_options:
+        render_empty_state("Wallet Details", "Add wallets to your watchlist before viewing wallet details.")
+        return
 
     if wallet_options:
+        selected_index = wallet_options.index(selected_wallet) if selected_wallet in wallet_options else 0
         viewer_wallet = st.selectbox(
-            "Wallet",
+            "Select wallet",
             wallet_options,
-            index=wallet_options.index(selected_wallet) if selected_wallet in wallet_options else 0,
+            index=selected_index,
+            format_func=lambda wallet: wallet_label_text(wallet, ranked_lookup),
             key="trade_viewer_wallet",
         )
     else:
@@ -1711,11 +1837,13 @@ def render_wallet_trade_viewer(wallet_options: list[str], selected_wallet: str |
     lookback_days = {"Last 24h": 1, "Last 7d": 7, "Last 30d": 30}[lookback_label]
 
     if not viewer_wallet:
-        render_empty_state("No wallet selected", "Select a ranked or watched wallet to view its recent public trade tape.")
+        render_empty_state("No wallet selected", "Add wallets to your watchlist before viewing wallet details.")
         return
 
+    st.markdown(wallet_badge_html(viewer_wallet, ranked_lookup), unsafe_allow_html=True)
+
     add_disabled = viewer_wallet in st.session_state["watchlist"]
-    if viewer_cols[4].button("Add to Watchlist", disabled=add_disabled):
+    if not require_watchlist and viewer_cols[4].button("Add to Watchlist", disabled=add_disabled):
         add_wallet_to_watchlist(viewer_wallet)
         st.rerun()
     try:
@@ -1730,8 +1858,11 @@ def render_wallet_trade_viewer(wallet_options: list[str], selected_wallet: str |
         logger.warning("Could not load trades for wallet %s", viewer_wallet, exc_info=True)
         trade_df = pd.DataFrame()
         st.warning("Recent trades unavailable for this wallet right now.")
+    if not trade_df.empty:
+        trade_df["wallet_label"] = wallet_label_text(viewer_wallet, ranked_lookup)
 
     trade_columns = [
+        "wallet_label",
         "market_title",
         "outcome_action",
         "side",
@@ -1750,6 +1881,7 @@ def render_wallet_trade_viewer(wallet_options: list[str], selected_wallet: str |
         use_container_width=True,
         hide_index=True,
         column_config={
+            "wallet_label": st.column_config.TextColumn("Wallet", width=430),
             "market_title": "Market",
             "outcome_action": "YES/NO",
             "side": "Buy/sell",
@@ -1763,8 +1895,9 @@ def render_wallet_trade_viewer(wallet_options: list[str], selected_wallet: str |
     )
 
 
-def collect_watchlist_trades(whale_wallets: set[str]) -> pd.DataFrame:
+def collect_watchlist_trades(ranked_lookup: dict[str, dict], whale_mode: bool) -> pd.DataFrame:
     watchlist_frames = []
+    whale_wallets = set(ranked_lookup.keys()) if whale_mode else set()
     for wallet in st.session_state["watchlist"]:
         try:
             wallet_trades = load_wallet_trade_view(wallet)
@@ -1780,6 +1913,8 @@ def collect_watchlist_trades(whale_wallets: set[str]) -> pd.DataFrame:
             min_trade_value=0.0,
             lookback_days=30,
         )
+        wallet_trades["wallet_tier"] = wallet_tier(wallet, ranked_lookup)
+        wallet_trades["wallet_label"] = wallet_label_text(wallet, ranked_lookup)
         wallet_trades["whale_wallet"] = wallet in whale_wallets
         watchlist_frames.append(wallet_trades)
     if not watchlist_frames:
@@ -1801,7 +1936,7 @@ def alert_toast_message(alert: dict) -> str:
     price = alert.get("price")
     price_label = f"{float(price):.4f}" if price not in (None, "") else "unknown price"
     return (
-        f"New whale trade: {alert.get('wallet')} {verb} {alert.get('outcome') or 'UNKNOWN'} "
+        f"New whale trade: {alert.get('wallet_label') or alert.get('wallet')} {verb} {alert.get('outcome') or 'UNKNOWN'} "
         f"on {alert.get('market') or 'Unknown market'} at {price_label}"
     )
 
@@ -1868,6 +2003,8 @@ def detect_watchlist_alerts(
         for _, row in eligible_rows.sort_values("timestamp_raw", ascending=False).iterrows():
             alert = {
                 "wallet": wallet,
+                "wallet_tier": row.get("wallet_tier") or wallet_tier(wallet),
+                "wallet_label": row.get("wallet_label") or wallet_label_text(wallet),
                 "market": row.get("market_title") or "Unknown market",
                 "outcome": row.get("outcome") or "",
                 "side": row.get("side") or "",
@@ -1896,39 +2033,45 @@ def detect_watchlist_alerts(
 
 
 def render_new_alerts() -> None:
-    render_section_header(
-        "New Alerts",
-        "Watchlist Signal",
-        "Fresh watched-wallet trades appear here after the first quiet baseline refresh.",
-        right_html=f'{badge("Live", "green")}',
-    )
     alerts = st.session_state.get("new_trade_alerts", [])
+    render_compact_title("New Alerts", badge(f"{len(alerts)} alert{'s' if len(alerts) != 1 else ''}", "green"))
     if not alerts:
-        render_empty_state("No new alerts", "New watched-wallet trades above the alert minimum will appear here.")
+        render_empty_state("No new alerts", "Trades above your alert minimum will appear here.")
         return
     clear_col, count_col = st.columns([1, 4])
     if clear_col.button("Clear alerts", key="clear-watchlist-alerts"):
         st.session_state["new_trade_alerts"] = []
         st.rerun()
-    count_col.caption(f"{len(alerts)} recent alert{'s' if len(alerts) != 1 else ''}")
-    alert_df = pd.DataFrame(alerts)
-    alert_columns = ["wallet", "market", "outcome", "side", "price", "size", "dollar_value", "timestamp", "market_link"]
-    st.dataframe(
-        style_financial_table(alert_df[alert_columns]),
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "wallet": "Wallet",
-            "market": "Market",
-            "outcome": "YES/NO",
-            "side": "Buy/sell",
-            "price": st.column_config.NumberColumn("Price", format="%.4f"),
-            "size": st.column_config.NumberColumn("Size", format="%.2f"),
-            "dollar_value": st.column_config.NumberColumn("Dollar value", format="$%.2f"),
-            "timestamp": "Timestamp",
-            "market_link": st.column_config.LinkColumn("Market link", display_text="Open"),
-        },
-    )
+    count_col.caption("Newest first")
+    for index, alert in enumerate(alerts[:12], start=1):
+        wallet = str(alert.get("wallet") or "")
+        tier = normalize_tier_name(alert.get("wallet_tier")) if alert.get("wallet_tier") else wallet_tier(wallet)
+        wallet_html = (
+            f'<span class="ww-wallet-inline">{tier_html(tier)}'
+            f'<span class="ww-wallet-address compact">{html.escape(wallet)}</span></span>'
+        )
+        market = html.escape(str(alert.get("market") or "Unknown market"))
+        market_link = str(alert.get("market_link") or "")
+        market_html = f'<a href="{html.escape(market_link)}" target="_blank">{market}</a>' if market_link else market
+        side = html.escape(str(alert.get("side") or "").title())
+        outcome = html.escape(str(alert.get("outcome") or ""))
+        price = safe_number(alert.get("price"))
+        size = safe_number(alert.get("size"))
+        value = safe_number(alert.get("dollar_value"))
+        timestamp = html.escape(str(alert.get("timestamp") or ""))
+        st.markdown(
+            f"""
+            <div class="ww-alert-row">
+              <div class="ww-brand-row">
+                <div>{wallet_html}</div>
+                <div class="ww-num ww-num-positive">{format_money(value)}</div>
+              </div>
+              <div class="ww-alert-market">{market_html}</div>
+              <div class="ww-section-copy">{side} {outcome} at {price:.4f} · {size:,.2f} shares · {timestamp}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 def last_trade_times_from_df(watchlist_df: pd.DataFrame) -> dict[str, str]:
@@ -1952,125 +2095,63 @@ def render_watchlist_body(
     enable_popup_alerts: bool,
     play_sound: bool,
 ) -> None:
-    whale_wallets = set(ranked_lookup.keys()) if whale_mode else set()
-    watchlist_df = collect_watchlist_trades(whale_wallets)
+    watchlist_df = collect_watchlist_trades(ranked_lookup, whale_mode)
     detect_watchlist_alerts(watchlist_df, alert_min_trade_value, enable_popup_alerts, play_sound)
     render_new_alerts()
 
-    st.divider()
-    render_section_header(
-        "Saved Wallets",
-        "Private Watchlist",
-        "Wallets are stored under your account and never shared with other users.",
-    )
-    header = st.columns([4, 1, 1, 1, 2, 1])
-    header[0].markdown("**Wallet address**")
-    header[1].markdown("**Whale score**")
-    header[2].markdown("**Net profit**")
-    header[3].markdown("**ROI**")
-    header[4].markdown("**Last trade time**")
-    header[5].markdown("**Remove**")
+    render_compact_title("Saved Wallets")
+    header = st.columns([1.25, 5, 1.25, 1.35, 1.05, 2, 1])
+    header[0].markdown('<div class="ww-watchlist-head">Tier</div>', unsafe_allow_html=True)
+    header[1].markdown('<div class="ww-watchlist-head">Wallet address</div>', unsafe_allow_html=True)
+    header[2].markdown('<div class="ww-watchlist-head">Whale score</div>', unsafe_allow_html=True)
+    header[3].markdown('<div class="ww-watchlist-head">Net profit</div>', unsafe_allow_html=True)
+    header[4].markdown('<div class="ww-watchlist-head">ROI</div>', unsafe_allow_html=True)
+    header[5].markdown('<div class="ww-watchlist-head">Last trade</div>', unsafe_allow_html=True)
+    header[6].markdown('<div class="ww-watchlist-head">Remove</div>', unsafe_allow_html=True)
 
     last_trade_times = last_trade_times_from_df(watchlist_df)
     for item in list(st.session_state["watchlist_items"]):
         wallet = str(item.get("wallet", "")).lower()
         merged = {**item, **ranked_lookup.get(wallet, {})}
         last_trade = last_trade_times.get(wallet, "")
-        cols = st.columns([4, 1, 1, 1, 2, 1])
-        cols[0].code(wallet, language="text")
-        cols[1].write("" if merged.get("whale_score") is None else f"{float(merged.get('whale_score')):.2f}")
-        cols[2].write("" if merged.get("net_profit") is None else f"${float(merged.get('net_profit')):,.2f}")
-        cols[3].write("" if merged.get("roi_pct") is None else f"{float(merged.get('roi_pct')):.2f}%")
-        cols[4].write(last_trade or "N/A")
-        if cols[5].button("Remove", key=f"remove-{wallet}"):
+        tier = wallet_tier(wallet, ranked_lookup)
+        cols = st.columns([1.25, 5, 1.25, 1.35, 1.05, 2, 1])
+        cols[0].markdown(tier_html(tier), unsafe_allow_html=True)
+        cols[1].markdown(f'<span class="ww-wallet-address compact">{html.escape(wallet)}</span>', unsafe_allow_html=True)
+        cols[2].write("" if merged.get("whale_score") is None else f"{safe_number(merged.get('whale_score')):.2f}")
+        cols[3].write("" if merged.get("net_profit") is None else format_money(merged.get("net_profit")))
+        cols[4].write("" if merged.get("roi_pct") is None else format_percent(merged.get("roi_pct")))
+        cols[5].write(last_trade or "N/A")
+        if cols[6].button("Remove", key=f"remove-{wallet}"):
             remove_wallet_from_watchlist(wallet)
             st.rerun()
 
-    st.divider()
-    render_section_header(
-        "Recent Watchlist Trades",
-        "Live Tape",
-        "Latest public activity from all saved wallets, with whale rows highlighted.",
-    )
-    if watchlist_df.empty:
-        render_empty_state("No recent watchlist trades", "Refresh the watchlist or add active wallets from the leaderboard.")
-        return
-
-    watchlist_columns = [
-        "wallet",
-        "market_title",
-        "outcome",
-        "side",
-        "price",
-        "size_shares",
-        "timestamp",
-        "market_link",
-    ]
-
-    def highlight_whales(row):
-        style = "background-color: rgba(25, 184, 255, 0.14); color: #edf6ff; font-weight: 700;" if row.get("whale_wallet") else ""
-        return [style for _ in row]
-
-    st.dataframe(
-        watchlist_df[watchlist_columns + ["whale_wallet"]].style.apply(highlight_whales, axis=1),
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "wallet": "Wallet",
-            "market_title": "Market",
-            "outcome": "YES/NO",
-            "side": "Buy/sell",
-            "price": st.column_config.NumberColumn("Price", format="%.4f"),
-            "size_shares": st.column_config.NumberColumn("Size", format="%.2f"),
-            "timestamp": "Timestamp",
-            "market_link": st.column_config.LinkColumn("Market link", display_text="Open"),
-            "whale_wallet": "Whale wallet",
-        },
-    )
-
 
 def render_watchlist_page(ranked_df: pd.DataFrame | None = None, whale_mode: bool = True) -> None:
-    render_section_header(
-        "Watchlist",
-        "Whale Monitor",
-        "Track saved wallets, refresh their public trade tape, and surface new activity above your alert threshold.",
-        right_html=f'{badge("Auto-refresh", "green")}',
-    )
+    render_compact_title("Watchlist", badge("Private", "blue"))
     ensure_watchlist_state()
     watchlist_items = st.session_state["watchlist_items"]
     settings_state = user_settings()
 
-    controls = st.columns([1, 1, 1, 1])
-    auto_refresh = controls[0].checkbox("Auto-refresh Watchlist", value=True, help="Refreshes watched-wallet trade flow on a timer.")
-    refresh_seconds = controls[1].selectbox(
-        "Refresh interval",
-        [30, 60],
-        index=0,
-        format_func=lambda seconds: f"{seconds} seconds",
-    )
-    enable_popup_alerts = controls[2].checkbox(
-        "Enable popup alerts",
-        value=bool(settings_state["popup_alerts_enabled"]),
-        help="Shows a toast when a watched wallet has a new trade above your alert minimum.",
-    )
-    alert_min_trade_value = controls[3].number_input(
-        "Alert minimum trade size ($)",
+    controls = st.columns([1, 1, 1])
+    auto_refresh = controls[0].checkbox("Auto-refresh", value=True)
+    alert_min_trade_value = controls[1].number_input(
+        "Alert minimum trade size",
         min_value=0.0,
         value=float(settings_state["min_trade_size"]),
         step=50.0,
-        help="Only alert on watched-wallet trades at or above this dollar value.",
     )
-    update_user_settings(
-        min_trade_size=float(alert_min_trade_value),
-        popup_alerts_enabled=bool(enable_popup_alerts),
-    )
-    play_sound = st.checkbox("Play subtle sound", value=False)
+    refresh_now = controls[2].button("Refresh Watchlist Trades")
+    enable_popup_alerts = bool(settings_state["popup_alerts_enabled"])
+    play_sound = False
+    refresh_seconds = 60
+    update_user_settings(min_trade_size=float(alert_min_trade_value))
 
     if not watchlist_items:
         render_empty_state("No wallets in watchlist yet", "Add wallets from the leaderboard to build your private whale monitor.")
         return
 
-    if st.button("Refresh Watchlist Trades"):
+    if refresh_now:
         cached_wallet_recent_trades.clear()
         sync_user_data_from_firebase(force=True)
         st.rerun()
@@ -2080,7 +2161,6 @@ def render_watchlist_page(ranked_df: pd.DataFrame | None = None, whale_mode: boo
         ranked_lookup = {str(row["wallet"]).lower(): row.to_dict() for _, row in ranked_df.iterrows()}
 
     if auto_refresh and hasattr(st, "fragment"):
-        st.caption(f"Auto-refreshing every {int(refresh_seconds)} seconds.")
         st.fragment(run_every=int(refresh_seconds))(render_watchlist_body)(
             ranked_lookup,
             whale_mode,
@@ -2094,7 +2174,6 @@ def render_watchlist_page(ranked_df: pd.DataFrame | None = None, whale_mode: boo
                 f"<script>setTimeout(() => window.parent.location.reload(), {int(refresh_seconds) * 1000});</script>",
                 height=0,
             )
-            st.caption(f"Auto-refreshing every {int(refresh_seconds)} seconds.")
         render_watchlist_body(
             ranked_lookup,
             whale_mode,
@@ -2325,7 +2404,11 @@ if not rows:
         render_watchlist_page()
         st.stop()
     if page == "Wallet Details":
-        render_wallet_trade_viewer(st.session_state["watchlist"], st.session_state.get("selected_wallet"))
+        render_wallet_trade_viewer(
+            st.session_state["watchlist"],
+            st.session_state.get("selected_wallet"),
+            require_watchlist=True,
+        )
         st.stop()
     render_empty_state(
         "No whale scan loaded",
@@ -2384,12 +2467,16 @@ if page == "Watchlist":
     st.stop()
 
 if page == "Wallet Details":
-    if "wallet" in df.columns:
-        detail_wallets = [str(wallet) for wallet in df["wallet"].dropna().tolist()]
-    else:
-        detail_wallets = []
-    detail_wallets = list(dict.fromkeys(detail_wallets + st.session_state["watchlist"]))
-    render_wallet_trade_viewer(detail_wallets, st.session_state.get("selected_wallet"))
+    detail_lookup = {str(row["wallet"]).lower(): row.to_dict() for _, row in df.iterrows()} if "wallet" in df.columns else {}
+    selected_detail_wallet = st.session_state.get("selected_wallet")
+    if str(selected_detail_wallet or "").lower() not in set(st.session_state["watchlist"]):
+        selected_detail_wallet = None
+    render_wallet_trade_viewer(
+        st.session_state["watchlist"],
+        selected_detail_wallet,
+        ranked_lookup=detail_lookup,
+        require_watchlist=True,
+    )
     st.stop()
 
 render_section_header(
@@ -2518,7 +2605,12 @@ if selected_wallet:
     selected_metadata = selected_row.iloc[0].to_dict() if not selected_row.empty else None
     render_selected_wallet_panel(selected_wallet, selected_metadata)
     if st.session_state.get("show_selected_wallet_trades") == selected_wallet:
-        render_wallet_trade_viewer([selected_wallet], selected_wallet)
+        render_wallet_trade_viewer(
+            [selected_wallet],
+            selected_wallet,
+            ranked_lookup={selected_wallet.lower(): selected_metadata or {}},
+            require_watchlist=False,
+        )
 
 csv_columns = [column for column in columns if column in df.columns]
 csv = df[csv_columns].to_csv(index=False).encode("utf-8")

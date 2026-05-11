@@ -5,7 +5,6 @@ import logging
 import html
 import math
 from dataclasses import dataclass
-from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
@@ -366,29 +365,6 @@ def inject_whalewatch_theme() -> None:
         .ww-num-negative { color: var(--ww-red); }
         .ww-num-blue { color: var(--ww-blue); }
 
-        .ww-select-link {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 100%;
-            min-height: 2rem;
-            border: 1px solid rgba(25, 184, 255, 0.42);
-            background: rgba(25, 184, 255, 0.11);
-            color: var(--ww-text) !important;
-            text-decoration: none !important;
-            font-size: 0.72rem;
-            font-weight: 900;
-            text-transform: uppercase;
-            border-radius: 6px;
-            transition: transform 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
-        }
-
-        .ww-select-link:hover {
-            transform: translateY(-1px);
-            border-color: rgba(32, 242, 156, 0.55);
-            box-shadow: 0 0 18px rgba(25, 184, 255, 0.18);
-        }
-
         .ww-section {
             padding: 1rem 1.1rem;
             margin: 1rem 0;
@@ -690,6 +666,11 @@ def style_financial_table(table_df: pd.DataFrame):
             lambda value: "color: #ffd166; font-weight: 700;" if value else "color: #8ea1b7;",
             subset=[col],
         )
+    if "wallet" in table_df.columns:
+        styled = styled.map(
+            lambda _value: "font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.78rem;",
+            subset=["wallet"],
+        )
     return styled
 
 
@@ -774,16 +755,6 @@ def format_score(value) -> str:
     return f"{safe_number(value):.2f}"
 
 
-def current_query_wallet() -> str | None:
-    try:
-        value = st.query_params.get("selected_wallet")
-    except Exception:
-        return None
-    if isinstance(value, list):
-        return str(value[0]) if value else None
-    return str(value) if value else None
-
-
 inject_whalewatch_theme()
 
 
@@ -852,6 +823,7 @@ def reset_user_runtime_state() -> None:
         "discovered_wallets",
         "recent_trades",
         "selected_wallet",
+        "show_selected_wallet_trades",
     ]:
         st.session_state.pop(key, None)
 
@@ -1564,61 +1536,6 @@ def add_compact_wallet_table_fields(df: pd.DataFrame) -> pd.DataFrame:
     return display_df
 
 
-def render_wallet_results_table(df: pd.DataFrame, selected_wallet: str | None = None) -> None:
-    headers = [
-        "Tier",
-        "Wallet address",
-        "Whale score",
-        "Trend score",
-        "Net profit",
-        "ROI %",
-        "Win rate",
-        "Adjusted win",
-        "Total volume",
-        "Average position",
-        "Recent trades",
-        "Select",
-    ]
-    rows_html = [
-        '<div class="ww-wallet-row ww-wallet-head">'
-        + "".join(f'<div class="ww-wallet-cell">{header}</div>' for header in headers)
-        + "</div>"
-    ]
-    selected_lower = str(selected_wallet or "").lower()
-    for _, row in df.iterrows():
-        wallet = str(row.get("wallet") or "")
-        wallet_lower = wallet.lower()
-        tier = str(row.get("whale_tier") or "Dolphin")
-        score = row.get("whale_score", row.get("final_score", 0))
-        selected_class = " is-selected" if wallet_lower and wallet_lower == selected_lower else ""
-        select_href = f"?selected_wallet={quote(wallet)}#wallet-results"
-        cells = [
-            tier_html(tier),
-            f'<span class="ww-wallet-short" title="{html.escape(wallet)}">{html.escape(short_wallet(wallet))}</span>',
-            f'<span class="ww-num ww-num-blue">{format_score(score)}</span>',
-            f'<span class="ww-num ww-num-blue">{format_score(row.get("trend_score", 0))}</span>',
-            f'<span class="ww-num {number_tone(row.get("net_profit"))}">{format_money(row.get("net_profit"))}</span>',
-            f'<span class="ww-num {number_tone(row.get("roi_pct"))}">{format_percent(row.get("roi_pct"))}</span>',
-            f'<span class="ww-num ww-num-blue">{format_percent(row.get("win_rate"))}</span>',
-            f'<span class="ww-num ww-num-blue">{format_percent(row.get("adjusted_win_rate"))}</span>',
-            f'<span class="ww-num ww-num-blue">{format_money(row.get("total_volume"))}</span>',
-            f'<span class="ww-num ww-num-blue">{format_money(row.get("avg_trade_size"))}</span>',
-            f'<span class="ww-num ww-num-blue">{int(safe_number(row.get("recent_activity"))):,}</span>',
-            f'<a class="ww-select-link" href="{select_href}">Select</a>',
-        ]
-        rows_html.append(
-            f'<div class="ww-wallet-row{selected_class}">'
-            + "".join(f'<div class="ww-wallet-cell">{cell}</div>' for cell in cells)
-            + "</div>"
-        )
-    st.markdown(
-        '<div id="wallet-results"></div><div class="ww-wallet-table-wrap"><div class="ww-wallet-table">'
-        + "".join(rows_html)
-        + "</div></div>",
-        unsafe_allow_html=True,
-    )
-
-
 def render_selected_wallet_panel(selected_wallet: str, selected_metadata: dict | None) -> None:
     if not selected_metadata:
         return
@@ -1653,6 +1570,8 @@ def render_selected_wallet_panel(selected_wallet: str, selected_metadata: dict |
         render_metric_card("Total Volume", f"${float(selected_metadata.get('total_volume') or 0):,.2f}", "Capital flow", "blue")
     with metric_cols[4]:
         render_metric_card("Whale Score", f"{float(selected_metadata.get('whale_score') or 0):.2f}", "Weighted rank", "green")
+    st.caption("Copy wallet address")
+    st.code(selected_wallet, language="text")
     action_cols = st.columns([1, 1, 3])
     if action_cols[0].button(
         "Add to Watchlist",
@@ -1661,10 +1580,11 @@ def render_selected_wallet_panel(selected_wallet: str, selected_metadata: dict |
     ):
         add_wallet_to_watchlist(selected_wallet, selected_metadata)
         st.rerun()
-    if action_cols[1].button("Recent Trades", key="selected-wallet-recent-trades"):
+    if action_cols[1].button("View Recent Trades", key="selected-wallet-recent-trades"):
         st.session_state["selected_wallet"] = selected_wallet
         st.session_state["trade_viewer_wallet"] = selected_wallet
-        st.info("Open Wallet Details from the sidebar to inspect recent trades.")
+        st.session_state["show_selected_wallet_trades"] = selected_wallet
+        st.rerun()
 
 
 def market_link_for_trade(trade: dict) -> str:
@@ -2553,27 +2473,52 @@ for column in visible_columns:
     if column not in df.columns:
         df[column] = 0 if column not in ("whale_tier", "wallet") else ""
 
-query_wallet = current_query_wallet()
 available_wallets = {str(wallet).lower() for wallet in df["wallet"].dropna().astype(str)}
+st.caption("Select one wallet row to open the compact wallet panel below. The table keeps full wallet addresses and scrolls horizontally when needed.")
+ranking_event = st.dataframe(
+    style_financial_table(df[visible_columns]),
+    use_container_width=True,
+    hide_index=True,
+    on_select="rerun",
+    selection_mode="single-row",
+    key="wallet_rankings_table",
+    column_config={
+        "whale_tier": st.column_config.TextColumn("Tier", width=130),
+        "wallet": st.column_config.TextColumn(
+            "Wallet Address",
+            help="Full wallet address. Select a row to copy it from the detail panel.",
+            width=420,
+            pinned=True,
+        ),
+        "whale_score": st.column_config.NumberColumn("Whale Score", format="%.2f", width=135, alignment="right"),
+        "trend_score": st.column_config.NumberColumn("Trend Score", format="%.2f", width=135, alignment="right"),
+        "net_profit": st.column_config.NumberColumn("Net Profit", format="$%.2f", width=145, alignment="right"),
+        "roi_pct": st.column_config.NumberColumn("ROI %", format="%.2f%%", width=110, alignment="right"),
+        "win_rate": st.column_config.NumberColumn("Win Rate", format="%.2f%%", width=120, alignment="right"),
+        "adjusted_win_rate": st.column_config.NumberColumn("Adjusted Win Rate", format="%.2f%%", width=175, alignment="right"),
+        "total_volume": st.column_config.NumberColumn("Total Volume", format="$%.2f", width=155, alignment="right"),
+        "avg_trade_size": st.column_config.NumberColumn("Average Position Size", format="$%.2f", width=205, alignment="right"),
+        "recent_activity": st.column_config.NumberColumn("Recent Trades", format="%d", width=145, alignment="right"),
+    },
+)
+
 selected_wallet = None
-if query_wallet and query_wallet.lower() in available_wallets:
-    selected_wallet = query_wallet
+if isinstance(ranking_event, dict):
+    selected_rows = ranking_event.get("selection", {}).get("rows", [])
+else:
+    selected_rows = getattr(getattr(ranking_event, "selection", None), "rows", [])
+if selected_rows:
+    selected_wallet = str(df.iloc[selected_rows[0]]["wallet"])
+    st.session_state["selected_wallet"] = selected_wallet
 elif str(st.session_state.get("selected_wallet") or "").lower() in available_wallets:
     selected_wallet = str(st.session_state["selected_wallet"])
-if selected_wallet:
-    st.session_state["selected_wallet"] = selected_wallet
-
-st.caption("Use the Select button in the table to open the compact wallet panel. Hover the shortened address for the full wallet.")
-table_columns = visible_columns + ["wallet_display", "signals", "why_ranked_highly"]
-for column in table_columns:
-    if column not in df.columns:
-        df[column] = ""
-render_wallet_results_table(df[table_columns], selected_wallet)
 
 if selected_wallet:
     selected_row = df[df["wallet"].astype(str) == selected_wallet]
     selected_metadata = selected_row.iloc[0].to_dict() if not selected_row.empty else None
     render_selected_wallet_panel(selected_wallet, selected_metadata)
+    if st.session_state.get("show_selected_wallet_trades") == selected_wallet:
+        render_wallet_trade_viewer([selected_wallet], selected_wallet)
 
 csv_columns = [column for column in columns if column in df.columns]
 csv = df[csv_columns].to_csv(index=False).encode("utf-8")

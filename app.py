@@ -42,10 +42,10 @@ APP_TAGLINE = "Track smart money across prediction markets."
 st.set_page_config(page_title=APP_NAME, layout="wide")
 logger = logging.getLogger(__name__)
 
-MAX_RECENT_TRADES_FAST = 1000
+DEFAULT_RECENT_TRADES_TO_SCAN = 1000
 MAX_WALLETS_FAST = 50
-MAX_API_CALLS_PER_RUN = 100
-MAX_RUN_SECONDS = 60
+DEFAULT_MAX_API_CALLS_PER_RUN = 300
+DEFAULT_MAX_RUN_SECONDS = 180
 
 
 def inject_whalewatch_theme() -> None:
@@ -803,8 +803,8 @@ def update_user_settings(**updates) -> None:
 class RunBudget:
     started_at: float
     api_calls: int = 0
-    max_api_calls: int = MAX_API_CALLS_PER_RUN
-    max_seconds: int = MAX_RUN_SECONDS
+    max_api_calls: int = DEFAULT_MAX_API_CALLS_PER_RUN
+    max_seconds: int = DEFAULT_MAX_RUN_SECONDS
 
     def can_continue(self) -> bool:
         return self.api_calls < self.max_api_calls and (time.time() - self.started_at) < self.max_seconds
@@ -914,13 +914,14 @@ def discover_wallets_from_recent_trades(
     market_category: str,
     max_recent_trades: int,
     max_wallets: int,
+    max_runtime_seconds: int,
     progress=None,
     status=None,
     started_at: float | None = None,
 ) -> tuple[list[str], list[dict]]:
     day_seconds = 24 * 3600
-    page_size = min(500, max_recent_trades, MAX_RECENT_TRADES_FAST)
-    max_scan_rows = min(max_recent_trades, MAX_OFFSET, MAX_RECENT_TRADES_FAST)
+    page_size = min(500, max_recent_trades)
+    max_scan_rows = min(max_recent_trades, MAX_OFFSET)
     now_ts = int(time.time())
     since_ts = int(time.time()) - time_period_days * 24 * 3600
     wallet_volume: dict[str, float] = {}
@@ -929,14 +930,14 @@ def discover_wallets_from_recent_trades(
     started_at = started_at or time.time()
 
     for day_index in range(time_period_days):
-        if time.time() - started_at > MAX_RUN_SECONDS:
+        if time.time() - started_at > max_runtime_seconds:
             break
         window_end = now_ts - day_index * day_seconds
         window_start = max(since_ts, window_end - day_seconds)
         if window_end <= since_ts:
             break
         for offset in range(0, max_scan_rows, page_size):
-            if time.time() - started_at > MAX_RUN_SECONDS:
+            if time.time() - started_at > max_runtime_seconds:
                 break
             if offset >= MAX_OFFSET:
                 break
@@ -1671,16 +1672,32 @@ with st.sidebar:
     max_recent_trades = st.number_input(
         "Recent trades to scan",
         min_value=500,
-        max_value=MAX_RECENT_TRADES_FAST,
-        value=MAX_RECENT_TRADES_FAST,
+        max_value=5000,
+        value=DEFAULT_RECENT_TRADES_TO_SCAN,
         step=100,
     )
     max_wallets = st.number_input(
         "Candidate wallets to analyze",
         min_value=5,
-        max_value=MAX_WALLETS_FAST,
+        max_value=200,
         value=MAX_WALLETS_FAST,
         step=5,
+    )
+    max_runtime_seconds = st.number_input(
+        "Max runtime seconds",
+        min_value=30,
+        max_value=600,
+        value=DEFAULT_MAX_RUN_SECONDS,
+        step=30,
+        help="Stops long scans after this many seconds and shows partial results.",
+    )
+    max_api_calls_per_run = st.number_input(
+        "Max API calls per run",
+        min_value=25,
+        max_value=1000,
+        value=DEFAULT_MAX_API_CALLS_PER_RUN,
+        step=25,
+        help="Stops a run after this many wallet/API attempts.",
     )
     discover = st.button("Discover Wallets", type="primary")
     st.header("Manual Wallets")
@@ -1721,6 +1738,8 @@ if page == "Dashboard":
     )
 
 if discover:
+    scan_status = None
+    scan_progress = None
     try:
         run_started_at = time.time()
         scan_status = st.empty()
@@ -1731,10 +1750,13 @@ if discover:
                 str(market_category),
                 int(max_recent_trades),
                 int(max_wallets),
+                int(max_runtime_seconds),
                 progress=scan_progress,
                 status=scan_status,
                 started_at=run_started_at,
             )
+        scan_status.empty()
+        scan_progress.empty()
         st.session_state["discovered_wallets"] = wallets
         st.session_state["recent_trades"] = recent_trades
         st.success("Fetched recent trades successfully.")
@@ -1747,8 +1769,12 @@ if discover:
             else:
                 st.info("Fast Mode used recent trades only. Results are rough but quick.")
     except PolymarketAPIError as exc:
+        if scan_status:
+            scan_status.empty()
+        if scan_progress:
+            scan_progress.empty()
         logger.warning("Could not discover wallets", exc_info=exc)
-        st.error("Could not discover wallets from public API data right now.")
+        st.error("Discovery stopped: API error.")
         wallets = []
 
 if analyze and wallets:
@@ -1767,23 +1793,44 @@ st.markdown(
 if (discover and not fast_mode) or analyze:
     rows = []
     price_history_warning = False
-    progress = st.progress(0, "Fetching public market intelligence...")
-    status = st.empty()
+    progress_text = st.empty()
+    progress_bar = st.progress(0)
     run_started_at = time.time()
     analyzed_wallets = candidates[: int(max_wallets)]
-    for index, wallet in enumerate(analyzed_wallets, start=1):
-        if index > MAX_API_CALLS_PER_RUN or time.time() - run_started_at > MAX_RUN_SECONDS:
-            st.info("Run limit reached. Showing partial results.")
-            break
-        status.write(f"Analyzing wallet {index}/{len(analyzed_wallets)}")
-        try:
-            row = analyze_wallet(wallet, include_timing, int(time_period_days), str(market_category))
-            price_history_warning = price_history_warning or bool(row.get("price_history_warning"))
-            rows.append(row)
-        except PolymarketAPIError as exc:
-            logger.warning("Skipped wallet %s", wallet, exc_info=exc)
-            st.warning(f"{wallet}: public API data unavailable; skipped.")
-        progress.progress(index / len(analyzed_wallets), f"Analyzing wallet {index}/{len(analyzed_wallets)}")
+    total_wallets = len(analyzed_wallets)
+    stop_reason = ""
+    if not analyzed_wallets:
+        stop_reason = "no more candidate wallets"
+    else:
+        for index, wallet in enumerate(analyzed_wallets, start=1):
+            elapsed = time.time() - run_started_at
+            if index > int(max_api_calls_per_run):
+                stop_reason = "max API calls reached"
+                break
+            if elapsed > int(max_runtime_seconds):
+                stop_reason = "max runtime reached"
+                break
+            progress_text.markdown(f"Analyzing wallet {index}/{total_wallets}")
+            try:
+                row = analyze_wallet(wallet, include_timing, int(time_period_days), str(market_category))
+                price_history_warning = price_history_warning or bool(row.get("price_history_warning"))
+                rows.append(row)
+            except PolymarketAPIError as exc:
+                logger.warning("Skipped wallet %s", wallet, exc_info=exc)
+                st.warning(f"{wallet}: public API data unavailable; skipped.")
+                if not rows:
+                    stop_reason = "API error"
+            progress_bar.progress(index / total_wallets)
+        else:
+            stop_reason = "user selected limit reached"
+    progress_text.empty()
+    progress_bar.empty()
+    if stop_reason == "user selected limit reached" and total_wallets < int(max_wallets):
+        stop_reason = "no more candidate wallets"
+    if stop_reason and stop_reason != "user selected limit reached":
+        st.info(f"Showing partial results: {stop_reason}.")
+    elif stop_reason:
+        st.success(f"Analysis complete: {stop_reason}.")
     st.session_state["rows"] = rows
     st.session_state["fast_mode_results"] = False
     st.session_state["price_history_warning"] = price_history_warning

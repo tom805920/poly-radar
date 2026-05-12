@@ -18,6 +18,14 @@ from polymarket_tracker.api import (
     PolymarketClient,
 )
 from polymarket_tracker.db import connect, get_cache, save_wallet_score, set_cache
+from polymarket_tracker.crypto import (
+    CHAIN_CONFIGS,
+    calculate_crypto_wallet_score,
+    discover_crypto_whales,
+    fetch_crypto_recent_trades,
+    fetch_crypto_token_balances,
+    fetch_crypto_wallet_activity,
+)
 from polymarket_tracker.metrics import (
     CATEGORY_KEYWORDS,
     FilterSettings,
@@ -929,16 +937,27 @@ def reset_user_runtime_state() -> None:
     for key in [
         "watchlist_items",
         "watchlist",
+        "crypto_watchlist_items",
+        "crypto_watchlist",
         "seen_trade_ids",
         "seen_trade_timestamps",
         "watchlist_alert_wallets_initialized",
         "new_trade_alerts",
+        "crypto_seen_trade_ids",
+        "crypto_seen_trade_timestamps",
+        "crypto_alert_wallets_initialized",
+        "crypto_new_trade_alerts",
         "user_settings",
         "rows",
+        "crypto_rows",
         "discovered_wallets",
+        "crypto_discovered_wallets",
         "recent_trades",
+        "crypto_recent_activity",
         "selected_wallet",
+        "selected_crypto_wallet",
         "show_selected_wallet_trades",
+        "show_selected_crypto_trades",
     ]:
         st.session_state.pop(key, None)
 
@@ -1040,9 +1059,25 @@ def sync_user_data_from_firebase(force: bool = False) -> None:
     user_id = str(session["user_id"])
     if not force and st.session_state.get("loaded_user_id") == user_id:
         ensure_watchlist_state()
+        ensure_crypto_watchlist_state()
         return
     try:
-        st.session_state["watchlist_items"] = store.fetch_watchlist(str(session["id_token"]), user_id)
+        st.session_state["watchlist_items"] = store.fetch_watchlist(
+            str(session["id_token"]),
+            user_id,
+            collection="polymarket_watchlist",
+        )
+        if not st.session_state["watchlist_items"]:
+            st.session_state["watchlist_items"] = store.fetch_watchlist(
+                str(session["id_token"]),
+                user_id,
+                collection="watchlist",
+            )
+        st.session_state["crypto_watchlist_items"] = store.fetch_watchlist(
+            str(session["id_token"]),
+            user_id,
+            collection="crypto_watchlist",
+        )
         st.session_state["user_settings"] = store.fetch_user_settings(str(session["id_token"]), user_id)
         st.session_state["loaded_user_id"] = user_id
     except FirebaseError:
@@ -1050,6 +1085,7 @@ def sync_user_data_from_firebase(force: bool = False) -> None:
         st.error("Could not load your account data. Please try again later.")
         st.stop()
     ensure_watchlist_state()
+    ensure_crypto_watchlist_state()
 
 
 def ensure_watchlist_state() -> None:
@@ -1066,6 +1102,20 @@ def ensure_watchlist_state() -> None:
     st.session_state.setdefault("new_trade_alerts", [])
 
 
+def ensure_crypto_watchlist_state() -> None:
+    if "crypto_watchlist_items" not in st.session_state:
+        st.session_state["crypto_watchlist_items"] = []
+    st.session_state["crypto_watchlist"] = [
+        str(item.get("wallet", "")).lower()
+        for item in st.session_state["crypto_watchlist_items"]
+        if item.get("wallet")
+    ]
+    st.session_state.setdefault("crypto_seen_trade_ids", [])
+    st.session_state.setdefault("crypto_seen_trade_timestamps", {})
+    st.session_state.setdefault("crypto_alert_wallets_initialized", [])
+    st.session_state.setdefault("crypto_new_trade_alerts", [])
+
+
 def add_wallet_to_watchlist(wallet: str, row: dict | None = None) -> None:
     wallet = wallet.lower()
     ensure_watchlist_state()
@@ -1080,6 +1130,7 @@ def add_wallet_to_watchlist(wallet: str, row: dict | None = None) -> None:
             str(session["user_id"]),
             wallet,
             wallet_label=normalize_tier_name(row.get("whale_tier")) if row else None,
+            collection="polymarket_watchlist",
         )
     except FirebaseError:
         logger.warning("Could not add wallet to watchlist", exc_info=True)
@@ -1111,7 +1162,12 @@ def remove_wallet_from_watchlist(wallet: str) -> None:
         st.error("Log in before changing your watchlist.")
         return
     try:
-        store.delete_watchlist_wallet(str(session["id_token"]), str(session["user_id"]), wallet)
+        store.delete_watchlist_wallet_from_collection(
+            str(session["id_token"]),
+            str(session["user_id"]),
+            wallet,
+            collection="polymarket_watchlist",
+        )
     except FirebaseError:
         logger.warning("Could not remove wallet from watchlist", exc_info=True)
         st.error("Could not remove wallet from watchlist right now.")
@@ -1125,6 +1181,74 @@ def remove_wallet_from_watchlist(wallet: str) -> None:
         if str(item).lower() != wallet
     ]
     ensure_watchlist_state()
+
+
+def add_crypto_wallet_to_watchlist(wallet: str, row: dict | None = None) -> None:
+    wallet = str(wallet).lower()
+    ensure_crypto_watchlist_state()
+    session = current_auth_session()
+    store = get_firebase_store()
+    if not session or not store:
+        st.error("Log in before adding wallets to your crypto watchlist.")
+        return
+    try:
+        saved_items = store.upsert_watchlist(
+            str(session["id_token"]),
+            str(session["user_id"]),
+            wallet,
+            wallet_label=normalize_tier_name(row.get("whale_tier")) if row else None,
+            collection="crypto_watchlist",
+        )
+    except FirebaseError:
+        logger.warning("Could not add crypto wallet to watchlist", exc_info=True)
+        st.error("Could not add crypto wallet to watchlist right now.")
+        return
+    existing = {item["wallet"].lower(): item for item in st.session_state["crypto_watchlist_items"]}
+    item = saved_items[0] if saved_items else existing.get(wallet, {"wallet": wallet})
+    if row:
+        item.update(
+            {
+                "wallet": wallet,
+                "whale_score": row.get("whale_score"),
+                "net_profit": row.get("net_profit"),
+                "roi_pct": row.get("roi_pct"),
+                "whale_tier": normalize_tier_name(row.get("whale_tier")),
+                "chain": row.get("chain"),
+            }
+        )
+    existing[wallet] = item
+    st.session_state["crypto_watchlist_items"] = list(existing.values())
+    ensure_crypto_watchlist_state()
+
+
+def remove_crypto_wallet_from_watchlist(wallet: str) -> None:
+    wallet = str(wallet).lower()
+    ensure_crypto_watchlist_state()
+    session = current_auth_session()
+    store = get_firebase_store()
+    if not session or not store:
+        st.error("Log in before changing your crypto watchlist.")
+        return
+    try:
+        store.delete_watchlist_wallet_from_collection(
+            str(session["id_token"]),
+            str(session["user_id"]),
+            wallet,
+            collection="crypto_watchlist",
+        )
+    except FirebaseError:
+        logger.warning("Could not remove crypto wallet from watchlist", exc_info=True)
+        st.error("Could not remove crypto wallet from watchlist right now.")
+        return
+    st.session_state["crypto_watchlist_items"] = [
+        item for item in st.session_state["crypto_watchlist_items"] if str(item.get("wallet", "")).lower() != wallet
+    ]
+    st.session_state["crypto_alert_wallets_initialized"] = [
+        item
+        for item in st.session_state.get("crypto_alert_wallets_initialized", [])
+        if str(item).lower() != wallet
+    ]
+    ensure_crypto_watchlist_state()
 
 
 def user_settings() -> dict:
@@ -1180,6 +1304,23 @@ def cached_fetch(key: str, fetcher, ttl_seconds: int = 6 * 3600, budget: RunBudg
     return payload
 
 
+def crypto_api_key(chain: str) -> str | None:
+    key_names = {
+        "Ethereum": ["ETHERSCAN_API_KEY"],
+        "BNB Chain": ["BSCSCAN_API_KEY"],
+        "Base": ["ETHERSCAN_API_KEY", "BASESCAN_API_KEY"],
+        "Arbitrum": ["ETHERSCAN_API_KEY", "ARBISCAN_API_KEY"],
+    }
+    for name in key_names.get(chain, []):
+        try:
+            value = str(st.secrets.get(name, "")).strip()
+        except Exception:
+            value = ""
+        if value:
+            return value
+    return None
+
+
 @st.cache_data(ttl=30 * 60, show_spinner=False)
 def cached_recent_trade_page(limit: int, offset: int) -> list[dict]:
     client = api_client()
@@ -1209,6 +1350,56 @@ def cached_wallet_recent_trades(wallet: str, limit: int = 250) -> list[dict]:
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def cached_price_history(asset: str, start_ts: int, end_ts: int) -> list[dict]:
     return api_client().fetch_price_history(asset, start_ts, end_ts)
+
+
+@st.cache_data(ttl=10 * 60, show_spinner=False)
+def cached_discover_crypto_whales(
+    chain: str,
+    api_key: str | None,
+    token_filter: str,
+    min_transaction_size: float,
+    max_wallets: int,
+    time_period_days: int,
+    include_cex_related: bool,
+    seed_wallets: tuple[str, ...],
+) -> list[str]:
+    return discover_crypto_whales(
+        chain=chain,
+        api_key=api_key,
+        token_filter=token_filter,
+        min_transaction_size=float(min_transaction_size),
+        max_wallets=int(max_wallets),
+        time_period_days=int(time_period_days),
+        include_cex_related=bool(include_cex_related),
+        seed_wallets=list(seed_wallets),
+    )
+
+
+@st.cache_data(ttl=5 * 60, show_spinner=False)
+def cached_crypto_wallet_activity(
+    wallet: str,
+    chain: str,
+    api_key: str | None,
+    token_filter: str,
+    time_period_days: int,
+) -> list[dict]:
+    return fetch_crypto_wallet_activity(wallet, chain, api_key, token_filter, int(time_period_days))
+
+
+@st.cache_data(ttl=5 * 60, show_spinner=False)
+def cached_crypto_recent_trades(
+    wallet: str,
+    chain: str,
+    api_key: str | None,
+    token_filter: str,
+    time_period_days: int,
+) -> list[dict]:
+    return fetch_crypto_recent_trades(wallet, chain, api_key, token_filter, int(time_period_days))
+
+
+@st.cache_data(ttl=10 * 60, show_spinner=False)
+def cached_crypto_token_balances(wallet: str, chain: str, api_key: str | None) -> list[dict]:
+    return fetch_crypto_token_balances(wallet, chain, api_key)
 
 
 def fetch_price_history_chunked(asset: str, start_ts: int, end_ts: int) -> tuple[list[dict], bool]:
@@ -2183,6 +2374,490 @@ def render_watchlist_page(ranked_df: pd.DataFrame | None = None, whale_mode: boo
         )
 
 
+def crypto_watchlist_item_map() -> dict[str, dict]:
+    return {
+        str(item.get("wallet", "")).lower(): item
+        for item in st.session_state.get("crypto_watchlist_items", [])
+        if item.get("wallet")
+    }
+
+
+def crypto_wallet_tier(wallet: str, ranked_lookup: dict[str, dict] | None = None) -> str:
+    wallet_key = str(wallet or "").lower()
+    ranked_lookup = ranked_lookup or {}
+    ranked_row = ranked_lookup.get(wallet_key, {})
+    item = crypto_watchlist_item_map().get(wallet_key, {})
+    return normalize_tier_name(
+        ranked_row.get("whale_tier")
+        or item.get("whale_tier")
+        or item.get("wallet_label")
+    )
+
+
+def crypto_wallet_label_text(wallet: str, ranked_lookup: dict[str, dict] | None = None) -> str:
+    wallet = str(wallet or "")
+    return f"[{crypto_wallet_tier(wallet, ranked_lookup)}] {wallet}"
+
+
+def crypto_wallet_badge_html(wallet: str, ranked_lookup: dict[str, dict] | None = None) -> str:
+    wallet = str(wallet or "")
+    tier = crypto_wallet_tier(wallet, ranked_lookup)
+    return (
+        f'<span class="ww-wallet-inline">{tier_html(tier)}'
+        f'<span class="ww-wallet-address compact">{html.escape(wallet)}</span></span>'
+    )
+
+
+def crypto_rows_for_wallets(
+    wallets: list[str],
+    chain: str,
+    token_filter: str,
+    time_period_days: int,
+    min_transaction_size: float,
+) -> list[dict]:
+    api_key = crypto_api_key(chain)
+    rows = []
+    progress_text = st.empty()
+    progress_bar = st.progress(0)
+    total = len(wallets)
+    for index, wallet in enumerate(wallets, start=1):
+        progress_text.markdown(f"Analyzing crypto wallet {index}/{total}")
+        activity = cached_crypto_wallet_activity(wallet, chain, api_key, token_filter, int(time_period_days))
+        row = calculate_crypto_wallet_score(wallet, activity, chain, float(min_transaction_size))
+        rows.append(row)
+        progress_bar.progress(index / max(total, 1))
+    progress_text.empty()
+    progress_bar.empty()
+    return sorted(rows, key=lambda row: row.get("whale_score", 0), reverse=True)
+
+
+def crypto_activity_dataframe(
+    wallet: str,
+    chain: str,
+    token_filter: str,
+    time_period_days: int,
+    ranked_lookup: dict[str, dict] | None = None,
+) -> pd.DataFrame:
+    api_key = crypto_api_key(chain)
+    activity = cached_crypto_recent_trades(wallet, chain, api_key, token_filter, int(time_period_days))
+    rows = []
+    for transfer in activity:
+        from_wallet = str(transfer.get("from") or "").lower()
+        to_wallet = str(transfer.get("to") or "").lower()
+        wallet_key = str(wallet).lower()
+        direction = "In" if to_wallet == wallet_key else "Out" if from_wallet == wallet_key else "Transfer"
+        rows.append(
+            {
+                "wallet_label": crypto_wallet_label_text(wallet, ranked_lookup),
+                "chain": chain,
+                "direction": direction,
+                "token": transfer.get("token") or "",
+                "amount": transfer.get("amount") or 0,
+                "dollar_value": transfer.get("value_usd") or 0,
+                "timestamp_raw": transfer.get("timestamp_raw") or 0,
+                "timestamp": transfer.get("timestamp") or "",
+                "tx_hash": transfer.get("hash") or "",
+                "from": from_wallet,
+                "to": to_wallet,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("timestamp_raw", ascending=False) if rows else pd.DataFrame()
+
+
+def render_crypto_selected_wallet_panel(selected_wallet: str, selected_metadata: dict | None) -> None:
+    if not selected_metadata:
+        return
+    lookup = {selected_wallet.lower(): selected_metadata}
+    st.markdown(
+        f"""
+        <div class="ww-wallet-panel">
+          <div class="ww-brand-row">
+            <div>
+              <div class="ww-eyebrow">Selected Crypto Wallet</div>
+              <div style="margin: 0.35rem 0;">{crypto_wallet_badge_html(selected_wallet, lookup)}</div>
+            </div>
+            <div class="ww-pill-row">{badge(str(selected_metadata.get("chain") or "On-chain"), "blue")}{badge("Read-only", "green")}</div>
+          </div>
+          <div class="ww-terminal-line"></div>
+          <div class="ww-section-copy">{html.escape(str(selected_metadata.get("profit_note") or "Crypto scoring uses public on-chain wallet activity only."))}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    metric_cols = st.columns(5)
+    with metric_cols[0]:
+        render_metric_card("Whale Score", f"{safe_number(selected_metadata.get('whale_score')):.2f}", "On-chain rank", "green")
+    with metric_cols[1]:
+        render_metric_card("Total Volume", format_money(selected_metadata.get("total_volume")), "Observed stable transfers", "blue")
+    with metric_cols[2]:
+        render_metric_card("Average Position", format_money(selected_metadata.get("avg_trade_size")), "Mean transfer size", "blue")
+    with metric_cols[3]:
+        render_metric_card("Recent Activity", f"{int(safe_number(selected_metadata.get('recent_activity'))):,}", "Last 7 days", "green")
+    with metric_cols[4]:
+        render_metric_card("Estimated P/L", "N/A", "Not public from transfers", "blue")
+    st.caption("Copy wallet address")
+    st.code(selected_wallet, language="text")
+    action_cols = st.columns([1, 1, 3])
+    if action_cols[0].button(
+        "Add to Crypto Watchlist",
+        disabled=selected_wallet in st.session_state["crypto_watchlist"],
+        key="add-selected-crypto-wallet",
+    ):
+        add_crypto_wallet_to_watchlist(selected_wallet, selected_metadata)
+        st.rerun()
+    if action_cols[1].button("View Recent Transfers", key="selected-crypto-wallet-recent-transfers"):
+        st.session_state["selected_crypto_wallet"] = selected_wallet
+        st.session_state["show_selected_crypto_trades"] = selected_wallet
+        st.rerun()
+
+
+def render_crypto_activity_table(trade_df: pd.DataFrame) -> None:
+    if trade_df.empty:
+        render_empty_state("No matching activity", "No public on-chain transfers matched these filters.")
+        return
+    display_df = trade_df[
+        ["wallet_label", "chain", "direction", "token", "amount", "dollar_value", "timestamp", "tx_hash"]
+    ].copy()
+    st.dataframe(
+        style_financial_table(display_df),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "wallet_label": st.column_config.TextColumn("Wallet", width=430),
+            "chain": "Chain",
+            "direction": "Direction",
+            "token": "Token",
+            "amount": st.column_config.NumberColumn("Amount", format="%.4f"),
+            "dollar_value": st.column_config.NumberColumn("Value", format="$%.2f"),
+            "timestamp": "Timestamp",
+            "tx_hash": st.column_config.TextColumn("Transaction", width=260),
+        },
+    )
+
+
+def render_crypto_wallet_details(
+    chain: str,
+    token_filter: str,
+    time_period_days: int,
+    ranked_lookup: dict[str, dict] | None = None,
+) -> None:
+    ensure_crypto_watchlist_state()
+    ranked_lookup = ranked_lookup or {}
+    wallet_options = st.session_state["crypto_watchlist"]
+    render_compact_title("Crypto Wallet Details", badge("On-chain", "blue"))
+    if not wallet_options:
+        render_empty_state("Wallet Details", "Add wallets to your crypto watchlist before viewing wallet details.")
+        return
+    selected = str(st.session_state.get("selected_crypto_wallet") or "")
+    selected_index = wallet_options.index(selected) if selected in wallet_options else 0
+    viewer_wallet = st.selectbox(
+        "Select wallet",
+        wallet_options,
+        index=selected_index,
+        format_func=lambda wallet: crypto_wallet_label_text(wallet, ranked_lookup),
+        key="crypto_trade_viewer_wallet",
+    )
+    st.markdown(crypto_wallet_badge_html(viewer_wallet, ranked_lookup), unsafe_allow_html=True)
+    filter_cols = st.columns([1, 1, 1])
+    min_value = filter_cols[0].number_input("Minimum transfer size", min_value=0.0, value=0.0, step=500.0)
+    direction = filter_cols[1].selectbox("Direction", ["All", "In", "Out"])
+    lookback_label = filter_cols[2].selectbox("Time window", ["Last 24h", "Last 7d", "Last 30d", "Selected period"], index=3)
+    lookback_days = {"Last 24h": 1, "Last 7d": 7, "Last 30d": 30, "Selected period": int(time_period_days)}[lookback_label]
+    trade_df = crypto_activity_dataframe(viewer_wallet, chain, token_filter, lookback_days, ranked_lookup)
+    if not trade_df.empty:
+        trade_df = trade_df[trade_df["dollar_value"] >= float(min_value)]
+        if direction != "All":
+            trade_df = trade_df[trade_df["direction"] == direction]
+    render_crypto_activity_table(trade_df)
+
+
+def detect_crypto_alerts(activity_df: pd.DataFrame, min_trade_value: float, ranked_lookup: dict[str, dict]) -> None:
+    seen_ids = {str(item) for item in st.session_state.get("crypto_seen_trade_ids", [])}
+    seen_timestamps = {
+        str(key): int(value or 0)
+        for key, value in st.session_state.get("crypto_seen_trade_timestamps", {}).items()
+    }
+    initialized_wallets = {
+        str(wallet).lower()
+        for wallet in st.session_state.get("crypto_alert_wallets_initialized", [])
+    }
+    if activity_df.empty:
+        initialized_wallets.update(st.session_state["crypto_watchlist"])
+        st.session_state["crypto_alert_wallets_initialized"] = sorted(initialized_wallets)
+        return
+    new_alerts = []
+    for wallet in st.session_state["crypto_watchlist"]:
+        wallet_rows = activity_df[activity_df["wallet"].astype(str).str.lower() == wallet] if "wallet" in activity_df.columns else pd.DataFrame()
+        if wallet not in initialized_wallets:
+            for _, row in wallet_rows.iterrows():
+                trade_id = str(row.get("tx_hash") or "")
+                if trade_id:
+                    seen_ids.add(trade_id)
+                    seen_timestamps[trade_id] = int(row.get("timestamp_raw") or 0)
+            initialized_wallets.add(wallet)
+            continue
+        unseen = wallet_rows[~wallet_rows["tx_hash"].astype(str).isin(seen_ids)] if not wallet_rows.empty else pd.DataFrame()
+        eligible = unseen[unseen["dollar_value"] >= float(min_trade_value)] if not unseen.empty else pd.DataFrame()
+        for _, row in eligible.sort_values("timestamp_raw", ascending=False).iterrows():
+            alert = row.to_dict()
+            alert["wallet_tier"] = crypto_wallet_tier(wallet, ranked_lookup)
+            new_alerts.append(alert)
+            st.toast(
+                f"New on-chain whale transfer: {crypto_wallet_label_text(wallet, ranked_lookup)} "
+                f"{row.get('direction')} {format_money(row.get('dollar_value'))} {row.get('token')}"
+            )
+        for _, row in wallet_rows.iterrows():
+            trade_id = str(row.get("tx_hash") or "")
+            if trade_id:
+                seen_ids.add(trade_id)
+                seen_timestamps[trade_id] = int(row.get("timestamp_raw") or 0)
+    st.session_state["crypto_seen_trade_ids"] = sorted(seen_ids)
+    st.session_state["crypto_seen_trade_timestamps"] = seen_timestamps
+    st.session_state["crypto_alert_wallets_initialized"] = sorted(initialized_wallets)
+    if new_alerts:
+        st.session_state["crypto_new_trade_alerts"] = (new_alerts + st.session_state.get("crypto_new_trade_alerts", []))[:50]
+
+
+def render_crypto_new_alerts(ranked_lookup: dict[str, dict]) -> None:
+    alerts = st.session_state.get("crypto_new_trade_alerts", [])
+    render_compact_title("Crypto Alerts", badge(f"{len(alerts)} alert{'s' if len(alerts) != 1 else ''}", "green"))
+    if not alerts:
+        render_empty_state("No crypto alerts", "New watched-wallet transfers above your alert minimum will appear here.")
+        return
+    clear_col, count_col = st.columns([1, 4])
+    if clear_col.button("Clear crypto alerts", key="clear-crypto-alerts"):
+        st.session_state["crypto_new_trade_alerts"] = []
+        st.rerun()
+    count_col.caption("Newest first")
+    for alert in alerts[:12]:
+        wallet = str(alert.get("wallet") or "")
+        value = safe_number(alert.get("dollar_value"))
+        st.markdown(
+            f"""
+            <div class="ww-alert-row">
+              <div class="ww-brand-row">
+                <div>{crypto_wallet_badge_html(wallet, ranked_lookup)}</div>
+                <div class="ww-num ww-num-positive">{format_money(value)}</div>
+              </div>
+              <div class="ww-section-copy">{html.escape(str(alert.get("direction") or "Transfer"))} · {html.escape(str(alert.get("token") or ""))} · {html.escape(str(alert.get("timestamp") or ""))}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def render_crypto_watchlist(
+    chain: str,
+    token_filter: str,
+    time_period_days: int,
+    alert_min_trade_value: float,
+    ranked_lookup: dict[str, dict],
+) -> None:
+    ensure_crypto_watchlist_state()
+    render_compact_title("Crypto Watchlist", badge("Public on-chain", "blue"))
+    controls = st.columns([1, 1, 1])
+    auto_refresh = controls[0].checkbox("Auto-refresh", value=True, key="crypto-auto-refresh")
+    alert_min = controls[1].number_input("Alert minimum transfer", min_value=0.0, value=float(alert_min_trade_value), step=500.0)
+    refresh_now = controls[2].button("Refresh Crypto Watchlist")
+    if not st.session_state["crypto_watchlist_items"]:
+        render_empty_state("No crypto wallets in watchlist yet", "Add crypto wallets from the leaderboard to monitor on-chain activity.")
+        return
+    if refresh_now:
+        cached_crypto_recent_trades.clear()
+        cached_crypto_wallet_activity.clear()
+        sync_user_data_from_firebase(force=True)
+        st.rerun()
+    frames = []
+    for wallet in st.session_state["crypto_watchlist"]:
+        frame = crypto_activity_dataframe(wallet, chain, token_filter, int(time_period_days), ranked_lookup)
+        if not frame.empty:
+            frame["wallet"] = wallet
+            frames.append(frame)
+    activity_df = pd.concat(frames, ignore_index=True).sort_values("timestamp_raw", ascending=False) if frames else pd.DataFrame()
+    detect_crypto_alerts(activity_df, float(alert_min), ranked_lookup)
+    render_crypto_new_alerts(ranked_lookup)
+    render_compact_title("Saved Crypto Wallets")
+    header = st.columns([1.25, 5, 1.25, 1.35, 1.05, 2, 1])
+    for col, title in zip(header, ["Tier", "Wallet address", "Whale score", "Volume", "ROI", "Last transfer", "Remove"]):
+        col.markdown(f'<div class="ww-watchlist-head">{title}</div>', unsafe_allow_html=True)
+    last_times = last_trade_times_from_df(activity_df.rename(columns={"dollar_value": "value"})) if not activity_df.empty else {}
+    for item in list(st.session_state["crypto_watchlist_items"]):
+        wallet = str(item.get("wallet", "")).lower()
+        merged = {**item, **ranked_lookup.get(wallet, {})}
+        cols = st.columns([1.25, 5, 1.25, 1.35, 1.05, 2, 1])
+        cols[0].markdown(tier_html(crypto_wallet_tier(wallet, ranked_lookup)), unsafe_allow_html=True)
+        cols[1].markdown(f'<span class="ww-wallet-address compact">{html.escape(wallet)}</span>', unsafe_allow_html=True)
+        cols[2].write("" if merged.get("whale_score") is None else f"{safe_number(merged.get('whale_score')):.2f}")
+        cols[3].write("" if merged.get("total_volume") is None else format_money(merged.get("total_volume")))
+        cols[4].write("N/A")
+        cols[5].write(last_times.get(wallet, "N/A"))
+        if cols[6].button("Remove", key=f"remove-crypto-{wallet}"):
+            remove_crypto_wallet_from_watchlist(wallet)
+            st.rerun()
+    if auto_refresh:
+        components.html("<script>setTimeout(() => window.parent.location.reload(), 60000);</script>", height=0)
+
+
+def render_crypto_dashboard(
+    rows: list[dict],
+    chain: str,
+    min_volume: float,
+    min_whale_score: float,
+    min_win_rate: float,
+    token_filter: str,
+    time_period_days: int,
+) -> None:
+    render_section_header(
+        "Crypto Whale Finder",
+        "On-Chain Intelligence",
+        "Crypto whale tracking using public on-chain wallet activity. Binance private user trades are not public and are not tracked.",
+        right_html=f'{badge(chain, "blue")}{badge("Read-only", "green")}',
+    )
+    if not rows:
+        render_empty_state(
+            "No crypto whale scan loaded",
+            "Use Discover Crypto Whales in the sidebar. Add explorer API keys or seed wallets for richer discovery.",
+        )
+        return
+    filtered = [
+        row for row in rows
+        if safe_number(row.get("total_volume")) >= float(min_volume)
+        and safe_number(row.get("whale_score")) >= float(min_whale_score)
+        and safe_number(row.get("win_rate")) >= float(min_win_rate)
+    ]
+    if not filtered:
+        filtered = sorted(rows, key=lambda row: row.get("whale_score", 0), reverse=True)[: max(1, min(25, len(rows)))]
+        st.info("Showing best available crypto wallets because no wallet passed every selected threshold.")
+    df = pd.DataFrame(sorted(filtered, key=lambda row: row.get("whale_score", 0), reverse=True))
+    columns = [
+        "whale_tier",
+        "wallet",
+        "chain",
+        "whale_score",
+        "trend_score",
+        "total_volume",
+        "avg_trade_size",
+        "largest_trade",
+        "recent_activity",
+        "trade_count",
+        "unique_tokens",
+    ]
+    for column in columns:
+        if column not in df.columns:
+            df[column] = "" if column in {"whale_tier", "wallet", "chain"} else 0
+    metric_cols = st.columns(4)
+    with metric_cols[0]:
+        render_metric_card("Wallets Found", f"{len(rows):,}", "Public candidates", "blue")
+    with metric_cols[1]:
+        render_metric_card("Shown", f"{len(df):,}", "After filters", "green")
+    with metric_cols[2]:
+        render_metric_card("Best Score", f"{safe_number(df['whale_score'].max()):.2f}", "Crypto whale rank", "green")
+    with metric_cols[3]:
+        render_metric_card("Top Volume", format_money(df["total_volume"].max()), "Observed transfers", "blue")
+    ranking_event = st.dataframe(
+        style_financial_table(df[columns]),
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="crypto_wallet_rankings_table",
+        column_config={
+            "whale_tier": st.column_config.TextColumn("Tier", width=130),
+            "wallet": st.column_config.TextColumn("Wallet Address", width=420, pinned=True),
+            "chain": "Chain",
+            "whale_score": st.column_config.NumberColumn("Whale Score", format="%.2f", alignment="right"),
+            "trend_score": st.column_config.NumberColumn("Trend Score", format="%.2f", alignment="right"),
+            "total_volume": st.column_config.NumberColumn("Total Volume", format="$%.2f", alignment="right"),
+            "avg_trade_size": st.column_config.NumberColumn("Average Position Size", format="$%.2f", alignment="right"),
+            "largest_trade": st.column_config.NumberColumn("Largest Transfer", format="$%.2f", alignment="right"),
+            "recent_activity": st.column_config.NumberColumn("Recent Transfers", format="%d", alignment="right"),
+            "trade_count": st.column_config.NumberColumn("Transfers", format="%d", alignment="right"),
+            "unique_tokens": st.column_config.NumberColumn("Tokens", format="%d", alignment="right"),
+        },
+    )
+    selected_wallet = None
+    if isinstance(ranking_event, dict):
+        selected_rows = ranking_event.get("selection", {}).get("rows", [])
+    else:
+        selected_rows = getattr(getattr(ranking_event, "selection", None), "rows", [])
+    if selected_rows:
+        selected_wallet = str(df.iloc[selected_rows[0]]["wallet"])
+        st.session_state["selected_crypto_wallet"] = selected_wallet
+    elif str(st.session_state.get("selected_crypto_wallet") or "").lower() in set(df["wallet"].astype(str).str.lower()):
+        selected_wallet = str(st.session_state["selected_crypto_wallet"])
+    if selected_wallet:
+        selected_row = df[df["wallet"].astype(str).str.lower() == selected_wallet.lower()]
+        selected_metadata = selected_row.iloc[0].to_dict() if not selected_row.empty else None
+        render_crypto_selected_wallet_panel(selected_wallet, selected_metadata)
+        if st.session_state.get("show_selected_crypto_trades") == selected_wallet:
+            ranked_lookup = {str(row["wallet"]).lower(): row.to_dict() for _, row in df.iterrows()}
+            render_compact_title("Recent On-Chain Activity")
+            trade_df = crypto_activity_dataframe(selected_wallet, chain, token_filter, time_period_days, ranked_lookup)
+            render_crypto_activity_table(trade_df)
+    csv = df[columns].to_csv(index=False).encode("utf-8")
+    st.download_button("Export crypto results to CSV", csv, "whalewatch_crypto_rankings.csv", "text/csv")
+
+
+def render_crypto_platform(
+    crypto_page: str,
+    chain: str,
+    min_volume: float,
+    min_transaction_size: float,
+    min_whale_score: float,
+    min_win_rate: float,
+    token_filter: str,
+    time_period_days: int,
+    max_wallets: int,
+    include_cex_related: bool,
+    seed_wallet_text: str,
+    discover_crypto: bool,
+) -> None:
+    ensure_crypto_watchlist_state()
+    api_key = crypto_api_key(chain)
+    seed_wallets = tuple(normalize_wallets(seed_wallet_text))
+    if discover_crypto:
+        with st.spinner("Scanning public on-chain transfers..."):
+            wallets = cached_discover_crypto_whales(
+                chain,
+                api_key,
+                token_filter,
+                float(min_transaction_size),
+                int(max_wallets),
+                int(time_period_days),
+                bool(include_cex_related),
+                seed_wallets,
+            )
+            st.session_state["crypto_discovered_wallets"] = wallets
+            st.session_state["crypto_rows"] = crypto_rows_for_wallets(
+                wallets,
+                chain,
+                token_filter,
+                int(time_period_days),
+                float(min_transaction_size),
+            )
+        if wallets:
+            st.success("Fetched public on-chain activity successfully.")
+        else:
+            st.warning("No crypto whale candidates found. Add explorer API keys, seed wallets, or lower the transfer threshold.")
+    rows = st.session_state.get("crypto_rows", [])
+    ranked_lookup = {str(row["wallet"]).lower(): row for row in rows if row.get("wallet")}
+    if crypto_page == "Watchlist":
+        render_crypto_watchlist(chain, token_filter, int(time_period_days), float(min_transaction_size), ranked_lookup)
+        return
+    if crypto_page == "Wallet Details":
+        render_crypto_wallet_details(chain, token_filter, int(time_period_days), ranked_lookup)
+        return
+    render_crypto_dashboard(
+        rows,
+        chain,
+        float(min_volume),
+        float(min_whale_score),
+        float(min_win_rate),
+        token_filter,
+        int(time_period_days),
+    )
+
+
 if not current_auth_session():
     render_auth_page()
     st.stop()
@@ -2200,6 +2875,14 @@ render_brand_header(
     ),
 )
 
+market_tab = st.radio(
+    "Market",
+    ["Polymarket", "Crypto"],
+    horizontal=True,
+    label_visibility="collapsed",
+    key="market_tab",
+)
+
 with st.sidebar:
     st.markdown(
         f"""
@@ -2213,82 +2896,132 @@ with st.sidebar:
     st.caption(f"Logged in as {auth_session.get('email', 'unknown') if auth_session else 'unknown'}")
     if st.button("Logout"):
         sign_out()
-    page = st.radio("Page", ["Dashboard", "Wallet Details", "Watchlist"])
-    st.header("Discovery")
-    whale_mode = st.checkbox(
-        "Whale Mode",
-        value=bool(settings_state["whale_mode_enabled"]),
-        help="Prioritizes wallets with meaningful capital, larger trade sizes, and cleaner non-bot behavior.",
-    )
-    update_user_settings(whale_mode_enabled=bool(whale_mode))
-    fast_mode = st.checkbox(
-        "Fast Mode",
-        value=not whale_mode,
-        help="Uses recent trades only for a quick ranked view. Disable it for deeper historical metrics.",
-    )
-    market_category = st.selectbox("Market category", list(CATEGORY_KEYWORDS.keys()))
-    time_period_days = st.selectbox("Time period", [30, 90, 180], index=1, format_func=lambda d: f"Last {d} days")
-    max_recent_trades = st.number_input(
-        "Recent trades to scan",
-        min_value=500,
-        max_value=5000,
-        value=DEFAULT_RECENT_TRADES_TO_SCAN,
-        step=100,
-    )
-    max_wallets = st.number_input(
-        "Candidate wallets to analyze",
-        min_value=5,
-        max_value=200,
-        value=MAX_WALLETS_FAST,
-        step=5,
-    )
-    max_runtime_seconds = st.number_input(
-        "Max runtime seconds",
-        min_value=30,
-        max_value=600,
-        value=DEFAULT_MAX_RUN_SECONDS,
-        step=30,
-        help="Stops long scans after this many seconds and shows partial results.",
-    )
-    max_api_calls_per_run = st.number_input(
-        "Max API calls per run",
-        min_value=25,
-        max_value=1000,
-        value=DEFAULT_MAX_API_CALLS_PER_RUN,
-        step=25,
-        help="Stops a run after this many wallet/API attempts.",
-    )
-    discover = st.button("Discover Wallets", type="primary")
-    st.header("Manual Wallets")
-    wallet_text = st.text_area(
-        "Optional wallet addresses",
-        height=110,
-        placeholder="0x...\n0x...",
-    )
-    st.header("Filters")
-    if whale_mode:
-        min_whale_score = st.slider("Minimum whale score", 0, 100, 20, 5, help="Soft quality floor. If no wallets pass, WhaleWatch still shows the best available ranked wallets.")
-        min_net_profit = st.slider("Minimum net profit", -5000, 100000, 500, 500, help="Profit preference. Strong volume can still keep a wallet in the ranked fallback set.")
-        min_volume = st.slider("Minimum total volume", 0, 1000000, 10000, 5000, help="Total observed dollars traded by the wallet.")
-        min_avg_trade_size = st.slider("Minimum average trade size", 0, 10000, 150, 50, help="Raises the capital threshold to reduce tiny-wallet noise.")
-        min_largest_trade = st.slider("Minimum largest trade", 0, 100000, 500, 500, help="Requires at least one position large enough to matter.")
-        min_resolved = st.slider("Minimum resolved markets", 0, 250, 8, 1, help="Moderate sample-size guardrail for reliability.")
+    if market_tab == "Crypto":
+        crypto_page = st.radio("Crypto Page", ["Dashboard", "Wallet Details", "Watchlist"])
+        st.header("Crypto Discovery")
+        crypto_chain = st.selectbox("Chain", list(CHAIN_CONFIGS.keys()))
+        token_options = ["All"] + list(CHAIN_CONFIGS[crypto_chain]["stable_tokens"].keys())
+        crypto_token_filter = st.selectbox("Token filter", token_options)
+        crypto_time_period_days = st.selectbox("Time period", [7, 30, 90], index=1, format_func=lambda d: f"Last {d} days")
+        crypto_max_wallets = st.number_input("Candidate wallets to analyze", min_value=5, max_value=200, value=50, step=5)
+        include_cex_related = st.checkbox(
+            "Include public CEX-related wallets",
+            value=False,
+            help="Uses only public labelled addresses where available. This does not track private exchange user accounts.",
+        )
+        crypto_seed_wallet_text = st.text_area(
+            "Optional seed wallets",
+            height=100,
+            placeholder="0x...\n0x...",
+            help="Optional public wallets to score alongside discovered candidates.",
+        )
+        discover_crypto = st.button("Discover Crypto Whales", type="primary")
+        st.header("Crypto Filters")
+        crypto_min_volume = st.number_input("Minimum wallet volume", min_value=0.0, value=25000.0, step=5000.0)
+        crypto_min_transaction_size = st.number_input("Minimum transaction size", min_value=0.0, value=25000.0, step=5000.0)
+        crypto_min_whale_score = st.slider("Minimum whale score", 0, 100, 20, 5)
+        crypto_min_win_rate = st.number_input(
+            "Minimum win rate if calculable",
+            min_value=0.0,
+            max_value=100.0,
+            value=0.0,
+            step=1.0,
+            help="For MVP transfer data this is usually not calculable and remains 0.",
+        )
     else:
-        min_whale_score = 0
-        min_net_profit = 0
-        min_avg_trade_size = 0
-        min_largest_trade = 0
-        min_resolved = st.number_input("Minimum resolved markets", min_value=0, value=5 if fast_mode else 50, step=5)
-        min_volume = st.number_input("Minimum total volume", min_value=0.0, value=100.0 if fast_mode else 1000.0, step=250.0)
-    min_win_rate = st.number_input("Minimum win rate %", min_value=0.0, max_value=100.0, value=45.0, step=1.0, help="Raw resolved-market win rate threshold.")
-    min_roi = st.number_input("Minimum ROI %", min_value=-100.0, value=-10.0 if whale_mode else 0.0, step=1.0, help="Profit relative to capital deployed where historical data is available.")
-    min_unique_markets = st.number_input("Minimum unique markets", min_value=0, value=0, step=1, help="Diversification guardrail across distinct markets.")
-    include_aggressive_traders = st.checkbox("Include aggressive traders", value=True, help="Keeps high-volume, high-position-size wallets even when ROI is volatile.")
-    include_bots = st.checkbox("Include bots", value=False, help="When off, wallets with strong bot-like repetition are heavily filtered after score penalties.")
-    exclude_lucky = st.checkbox("Down-rank one lucky big win", value=True, help="Large single-win concentration lowers score instead of fully removing the wallet.")
-    exclude_low_liq = st.checkbox("Exclude weak trade-data liquidity", value=True, help="Uses trade-data proxies rather than fragile open-interest endpoints.")
-    include_timing = st.checkbox("Estimate entry timing from price history", value=False, disabled=fast_mode, help="Optional and best-effort. Ranking still works when price history is unavailable.")
-    analyze = st.button("Analyze manual wallets")
+        page = st.radio("Page", ["Dashboard", "Wallet Details", "Watchlist"])
+        st.header("Discovery")
+        whale_mode = st.checkbox(
+            "Whale Mode",
+            value=bool(settings_state["whale_mode_enabled"]),
+            help="Prioritizes wallets with meaningful capital, larger trade sizes, and cleaner non-bot behavior.",
+        )
+        update_user_settings(whale_mode_enabled=bool(whale_mode))
+        fast_mode = st.checkbox(
+            "Fast Mode",
+            value=not whale_mode,
+            help="Uses recent trades only for a quick ranked view. Disable it for deeper historical metrics.",
+        )
+        market_category = st.selectbox("Market category", list(CATEGORY_KEYWORDS.keys()))
+        time_period_days = st.selectbox("Time period", [30, 90, 180], index=1, format_func=lambda d: f"Last {d} days")
+        max_recent_trades = st.number_input(
+            "Recent trades to scan",
+            min_value=500,
+            max_value=5000,
+            value=DEFAULT_RECENT_TRADES_TO_SCAN,
+            step=100,
+        )
+        max_wallets = st.number_input(
+            "Candidate wallets to analyze",
+            min_value=5,
+            max_value=200,
+            value=MAX_WALLETS_FAST,
+            step=5,
+        )
+        max_runtime_seconds = st.number_input(
+            "Max runtime seconds",
+            min_value=30,
+            max_value=600,
+            value=DEFAULT_MAX_RUN_SECONDS,
+            step=30,
+            help="Stops long scans after this many seconds and shows partial results.",
+        )
+        max_api_calls_per_run = st.number_input(
+            "Max API calls per run",
+            min_value=25,
+            max_value=1000,
+            value=DEFAULT_MAX_API_CALLS_PER_RUN,
+            step=25,
+            help="Stops a run after this many wallet/API attempts.",
+        )
+        discover = st.button("Discover Wallets", type="primary")
+        st.header("Manual Wallets")
+        wallet_text = st.text_area(
+            "Optional wallet addresses",
+            height=110,
+            placeholder="0x...\n0x...",
+        )
+        st.header("Filters")
+        if whale_mode:
+            min_whale_score = st.slider("Minimum whale score", 0, 100, 20, 5, help="Soft quality floor. If no wallets pass, WhaleWatch still shows the best available ranked wallets.")
+            min_net_profit = st.slider("Minimum net profit", -5000, 100000, 500, 500, help="Profit preference. Strong volume can still keep a wallet in the ranked fallback set.")
+            min_volume = st.slider("Minimum total volume", 0, 1000000, 10000, 5000, help="Total observed dollars traded by the wallet.")
+            min_avg_trade_size = st.slider("Minimum average trade size", 0, 10000, 150, 50, help="Raises the capital threshold to reduce tiny-wallet noise.")
+            min_largest_trade = st.slider("Minimum largest trade", 0, 100000, 500, 500, help="Requires at least one position large enough to matter.")
+            min_resolved = st.slider("Minimum resolved markets", 0, 250, 8, 1, help="Moderate sample-size guardrail for reliability.")
+        else:
+            min_whale_score = 0
+            min_net_profit = 0
+            min_avg_trade_size = 0
+            min_largest_trade = 0
+            min_resolved = st.number_input("Minimum resolved markets", min_value=0, value=5 if fast_mode else 50, step=5)
+            min_volume = st.number_input("Minimum total volume", min_value=0.0, value=100.0 if fast_mode else 1000.0, step=250.0)
+        min_win_rate = st.number_input("Minimum win rate %", min_value=0.0, max_value=100.0, value=45.0, step=1.0, help="Raw resolved-market win rate threshold.")
+        min_roi = st.number_input("Minimum ROI %", min_value=-100.0, value=-10.0 if whale_mode else 0.0, step=1.0, help="Profit relative to capital deployed where historical data is available.")
+        min_unique_markets = st.number_input("Minimum unique markets", min_value=0, value=0, step=1, help="Diversification guardrail across distinct markets.")
+        include_aggressive_traders = st.checkbox("Include aggressive traders", value=True, help="Keeps high-volume, high-position-size wallets even when ROI is volatile.")
+        include_bots = st.checkbox("Include bots", value=False, help="When off, wallets with strong bot-like repetition are heavily filtered after score penalties.")
+        exclude_lucky = st.checkbox("Down-rank one lucky big win", value=True, help="Large single-win concentration lowers score instead of fully removing the wallet.")
+        exclude_low_liq = st.checkbox("Exclude weak trade-data liquidity", value=True, help="Uses trade-data proxies rather than fragile open-interest endpoints.")
+        include_timing = st.checkbox("Estimate entry timing from price history", value=False, disabled=fast_mode, help="Optional and best-effort. Ranking still works when price history is unavailable.")
+        analyze = st.button("Analyze manual wallets")
+
+if market_tab == "Crypto":
+    render_crypto_platform(
+        crypto_page,
+        crypto_chain,
+        float(crypto_min_volume),
+        float(crypto_min_transaction_size),
+        float(crypto_min_whale_score),
+        float(crypto_min_win_rate),
+        crypto_token_filter,
+        int(crypto_time_period_days),
+        int(crypto_max_wallets),
+        bool(include_cex_related),
+        crypto_seed_wallet_text,
+        bool(discover_crypto),
+    )
+    st.stop()
 
 wallets = normalize_wallets(wallet_text)
 

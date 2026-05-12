@@ -188,10 +188,10 @@ class FirebaseStore:
             for key, value in (document.get("fields") or {}).items()
         }
 
-    def fetch_watchlist(self, id_token: str, user_id: str) -> list[dict]:
+    def fetch_watchlist(self, id_token: str, user_id: str, collection: str = "polymarket_watchlist") -> list[dict]:
         response = self._request(
             "GET",
-            self._doc_url("users", user_id, "watchlist"),
+            self._doc_url("users", user_id, collection),
             headers=self._auth_headers(id_token),
         )
         if response.status_code == 404:
@@ -206,12 +206,13 @@ class FirebaseStore:
         user_id: str,
         wallet_address: str,
         wallet_label: str | None = None,
+        collection: str = "polymarket_watchlist",
     ) -> list[dict]:
         wallet = wallet_address.lower()
         now = self._now_timestamp()
         response = self._request(
             "PATCH",
-            self._doc_url("users", user_id, "watchlist", wallet),
+            self._doc_url("users", user_id, collection, wallet),
             headers=self._auth_headers(id_token),
             json=self._fields(
                 {
@@ -225,9 +226,18 @@ class FirebaseStore:
         return [self._normalize_watchlist_doc(document, user_id)]
 
     def delete_watchlist_wallet(self, id_token: str, user_id: str, wallet_address: str) -> None:
+        self.delete_watchlist_wallet_from_collection(id_token, user_id, wallet_address, "polymarket_watchlist")
+
+    def delete_watchlist_wallet_from_collection(
+        self,
+        id_token: str,
+        user_id: str,
+        wallet_address: str,
+        collection: str = "polymarket_watchlist",
+    ) -> None:
         response = self._request(
             "DELETE",
-            self._doc_url("users", user_id, "watchlist", wallet_address.lower()),
+            self._doc_url("users", user_id, collection, wallet_address.lower()),
             headers=self._auth_headers(id_token),
         )
         if response.status_code != 404:

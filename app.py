@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import time
 import logging
 import html
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -50,6 +52,8 @@ from polymarket_tracker.firebase_store import (
 
 APP_NAME = "WhaleWatch"
 APP_TAGLINE = "Track smart money across prediction markets."
+APP_ROOT = Path(__file__).resolve().parent
+LOGO_IMAGE_PATH = APP_ROOT / "assets" / "whalewatch-logo.png"
 
 st.set_page_config(page_title=APP_NAME, layout="wide")
 logger = logging.getLogger(__name__)
@@ -58,6 +62,15 @@ DEFAULT_RECENT_TRADES_TO_SCAN = 1000
 MAX_WALLETS_FAST = 50
 DEFAULT_MAX_API_CALLS_PER_RUN = 300
 DEFAULT_MAX_RUN_SECONDS = 180
+
+
+@st.cache_data(show_spinner=False)
+def logo_data_uri(path: str, modified_ns: int) -> str:
+    logo_path = Path(path)
+    if not logo_path.exists():
+        return ""
+    encoded = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
 def inject_whalewatch_theme() -> None:
@@ -171,15 +184,25 @@ def inject_whalewatch_theme() -> None:
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            min-width: 2.55em;
-            height: 1.08em;
+            width: 1.14em;
+            min-width: 1.14em;
+            height: 1.14em;
             border: 2px solid var(--ww-blue);
-            box-shadow: 0 0 26px rgba(25, 184, 255, 0.48), inset 0 0 18px rgba(25, 184, 255, 0.18);
-            transform: skew(-13deg);
-            border-radius: 3px;
+            box-shadow: 0 0 26px rgba(25, 184, 255, 0.38), inset 0 0 18px rgba(25, 184, 255, 0.14);
+            border-radius: 6px;
             color: var(--ww-blue);
             font-size: 0.38em;
             letter-spacing: 0;
+            overflow: hidden;
+            background: radial-gradient(circle at 50% 50%, rgba(237, 246, 255, 0.18), rgba(25, 184, 255, 0.08) 42%, rgba(5, 9, 16, 0.88) 74%);
+        }
+
+        .ww-logo-mark img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+            filter: contrast(1.08) brightness(1.02);
         }
 
         .ww-logo-small {
@@ -619,12 +642,19 @@ def inject_whalewatch_theme() -> None:
 def render_brand_header(compact: bool = False, right_html: str = "") -> None:
     logo_class = "ww-logo ww-logo-small" if compact else "ww-logo"
     wrapper_class = "ww-topbar" if compact else "ww-auth-card"
+    logo_modified_ns = LOGO_IMAGE_PATH.stat().st_mtime_ns if LOGO_IMAGE_PATH.exists() else 0
+    logo_src = logo_data_uri(str(LOGO_IMAGE_PATH), logo_modified_ns)
+    logo_mark = (
+        f'<span class="ww-logo-mark"><img src="{logo_src}" alt="WhaleWatch logo" /></span>'
+        if logo_src
+        else '<span class="ww-logo-mark">WW</span>'
+    )
     st.markdown(
         f"""
         <div class="{wrapper_class}">
           <div class="ww-brand-row">
             <div>
-              <div class="{logo_class}"><span class="ww-logo-mark">WW</span>{APP_NAME}</div>
+              <div class="{logo_class}">{logo_mark}{APP_NAME}</div>
               <div class="ww-tagline">{APP_TAGLINE}</div>
             </div>
             <div>{right_html}</div>

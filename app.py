@@ -172,37 +172,37 @@ def inject_whalewatch_theme() -> None:
         .ww-logo {
             display: inline-flex;
             align-items: center;
-            gap: 0.72rem;
+            gap: 0.65rem;
             font-weight: 900;
             font-size: clamp(2.2rem, 5vw, 4.35rem);
             line-height: 0.94;
             color: var(--ww-text);
-            text-transform: uppercase;
+            text-transform: none;
         }
 
         .ww-logo-mark {
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            width: 1.14em;
-            min-width: 1.14em;
-            height: 1.14em;
-            border: 2px solid var(--ww-blue);
-            box-shadow: 0 0 26px rgba(25, 184, 255, 0.38), inset 0 0 18px rgba(25, 184, 255, 0.14);
-            border-radius: 6px;
+            width: 1.56em;
+            min-width: 1.56em;
+            height: 1.56em;
+            border: 0;
+            box-shadow: none;
+            border-radius: 0;
             color: var(--ww-blue);
-            font-size: 0.38em;
+            font-size: 1em;
             letter-spacing: 0;
-            overflow: hidden;
-            background: radial-gradient(circle at 50% 50%, rgba(237, 246, 255, 0.18), rgba(25, 184, 255, 0.08) 42%, rgba(5, 9, 16, 0.88) 74%);
+            overflow: visible;
+            background: transparent;
         }
 
         .ww-logo-mark img {
             width: 100%;
             height: 100%;
-            object-fit: cover;
+            object-fit: contain;
             display: block;
-            filter: contrast(1.08) brightness(1.02);
+            filter: drop-shadow(0 0 18px rgba(25, 184, 255, 0.18));
         }
 
         .ww-logo-small {
@@ -1218,6 +1218,79 @@ def remove_wallet_from_watchlist(wallet: str) -> None:
     ensure_watchlist_state()
 
 
+def firestore_scalar(value):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return float(value)
+    text = str(value).strip()
+    return text if text else None
+
+
+def optional_metric_number(value):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number) or math.isinf(number):
+        return None
+    return number
+
+
+def crypto_watchlist_metric_payload(row: dict | None, last_activity: str | None = None) -> dict:
+    if not row:
+        return {}
+    roi = optional_metric_number(row.get("roi_pct") if row.get("roi_pct") is not None else row.get("roi"))
+    average_trade_size = optional_metric_number(
+        row.get("avg_trade_size") if row.get("avg_trade_size") is not None else row.get("average_trade_size")
+    )
+    tier = normalize_tier_name(row.get("whale_tier") or row.get("tier") or row.get("wallet_label"))
+    payload = {
+        "wallet_label": tier,
+        "whale_tier": tier,
+        "tier": tier,
+        "whale_score": optional_metric_number(row.get("whale_score")),
+        "net_profit": optional_metric_number(row.get("net_profit")),
+        "roi_pct": roi,
+        "roi": roi,
+        "win_rate": optional_metric_number(row.get("win_rate")),
+        "total_volume": optional_metric_number(row.get("total_volume")),
+        "avg_trade_size": average_trade_size,
+        "average_trade_size": average_trade_size,
+        "last_activity": firestore_scalar(last_activity or row.get("last_activity")),
+        "chain": firestore_scalar(row.get("chain")),
+        "completed_trades": optional_metric_number(row.get("completed_trades")),
+        "confidence": firestore_scalar(row.get("confidence")),
+        "copy_quality": firestore_scalar(row.get("copy_quality")),
+    }
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def crypto_watchlist_has_core_metrics(item: dict) -> bool:
+    return all(
+        optional_metric_number(item.get(key)) is not None
+        for key in ["whale_score", "net_profit", "roi_pct", "win_rate", "total_volume", "avg_trade_size"]
+    )
+
+
 def add_crypto_wallet_to_watchlist(wallet: str, row: dict | None = None) -> None:
     wallet = str(wallet).lower()
     ensure_crypto_watchlist_state()
@@ -1226,6 +1299,7 @@ def add_crypto_wallet_to_watchlist(wallet: str, row: dict | None = None) -> None
     if not session or not store:
         st.error("Log in before adding wallets to your crypto watchlist.")
         return
+    metadata = crypto_watchlist_metric_payload(row, row.get("last_activity") if row else None)
     try:
         saved_items = store.upsert_watchlist(
             str(session["id_token"]),
@@ -1233,6 +1307,7 @@ def add_crypto_wallet_to_watchlist(wallet: str, row: dict | None = None) -> None
             wallet,
             wallet_label=normalize_tier_name(row.get("whale_tier")) if row else None,
             collection="crypto_watchlist",
+            metadata=metadata,
         )
     except FirebaseError:
         logger.warning("Could not add crypto wallet to watchlist", exc_info=True)
@@ -1241,24 +1316,38 @@ def add_crypto_wallet_to_watchlist(wallet: str, row: dict | None = None) -> None
     existing = {item["wallet"].lower(): item for item in st.session_state["crypto_watchlist_items"]}
     item = saved_items[0] if saved_items else existing.get(wallet, {"wallet": wallet})
     if row:
-        item.update(
-            {
-                "wallet": wallet,
-                "whale_score": row.get("whale_score"),
-                "net_profit": row.get("net_profit"),
-                "roi_pct": row.get("roi_pct"),
-                "whale_tier": normalize_tier_name(row.get("whale_tier")),
-                "chain": row.get("chain"),
-                "total_volume": row.get("total_volume"),
-                "avg_trade_size": row.get("avg_trade_size"),
-                "completed_trades": row.get("completed_trades"),
-                "confidence": row.get("confidence"),
-                "copy_quality": row.get("copy_quality"),
-            }
-        )
+        item.update({"wallet": wallet, **metadata})
     existing[wallet] = item
     st.session_state["crypto_watchlist_items"] = list(existing.values())
     ensure_crypto_watchlist_state()
+
+
+def persist_crypto_watchlist_metrics(wallet: str, row: dict, last_activity: str | None = None) -> dict:
+    wallet = str(wallet).lower()
+    metadata = crypto_watchlist_metric_payload(row, last_activity)
+    if not metadata:
+        return {}
+    session = current_auth_session()
+    store = get_firebase_store()
+    if session and store:
+        try:
+            store.upsert_watchlist(
+                str(session["id_token"]),
+                str(session["user_id"]),
+                wallet,
+                wallet_label=normalize_tier_name(metadata.get("whale_tier")),
+                collection="crypto_watchlist",
+                metadata=metadata,
+            )
+        except FirebaseError:
+            logger.warning("Could not persist crypto watchlist metrics for %s", wallet, exc_info=True)
+    existing = {str(item.get("wallet", "")).lower(): item for item in st.session_state.get("crypto_watchlist_items", [])}
+    item = existing.get(wallet, {"wallet": wallet})
+    item.update({"wallet": wallet, **metadata})
+    existing[wallet] = item
+    st.session_state["crypto_watchlist_items"] = list(existing.values())
+    ensure_crypto_watchlist_state()
+    return metadata
 
 
 def remove_crypto_wallet_from_watchlist(wallet: str) -> None:
@@ -2810,6 +2899,71 @@ def render_crypto_new_alerts(ranked_lookup: dict[str, dict]) -> None:
         )
 
 
+def crypto_last_activity_from_rows(rows: list[dict]) -> str:
+    timestamps = [int(row.get("timestamp_raw") or 0) for row in rows if int(row.get("timestamp_raw") or 0) > 0]
+    if not timestamps:
+        return ""
+    latest = max(timestamps)
+    return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(latest))
+
+
+def watchlist_metric_text(value, formatter, fallback: str = "Calculating...") -> str:
+    number = optional_metric_number(value)
+    if number is None:
+        return fallback
+    return formatter(number)
+
+
+def hydrate_crypto_watchlist_metrics(
+    chain: str,
+    token_filter: str,
+    time_period_days: int,
+    min_transaction_size: float,
+    ranked_lookup: dict[str, dict],
+    last_times: dict[str, str],
+) -> dict[str, str]:
+    status: dict[str, str] = {}
+    api_keys: dict[str, str | None] = {}
+    for item in list(st.session_state.get("crypto_watchlist_items", [])):
+        wallet = str(item.get("wallet") or "").lower()
+        if not wallet:
+            continue
+        merged = {**item, **ranked_lookup.get(wallet, {})}
+        if last_times.get(wallet):
+            merged["last_activity"] = last_times[wallet]
+        if crypto_watchlist_has_core_metrics(merged):
+            if not crypto_watchlist_has_core_metrics(item) or (last_times.get(wallet) and item.get("last_activity") != last_times[wallet]):
+                persist_crypto_watchlist_metrics(wallet, merged, last_times.get(wallet))
+            status[wallet] = "Ready"
+            continue
+
+        if wallet in ranked_lookup and crypto_watchlist_has_core_metrics(ranked_lookup[wallet]):
+            persist_crypto_watchlist_metrics(wallet, ranked_lookup[wallet], last_times.get(wallet))
+            status[wallet] = "Ready"
+            continue
+
+        wallet_chain = str(item.get("chain") or chain)
+        if wallet_chain not in CHAIN_CONFIGS:
+            wallet_chain = chain
+        if wallet_chain not in api_keys:
+            api_keys[wallet_chain] = crypto_api_key(wallet_chain)
+        api_key = api_keys[wallet_chain]
+        if not api_key:
+            status[wallet] = "Calculating..."
+            continue
+        try:
+            activity = cached_crypto_wallet_activity(wallet, wallet_chain, api_key, token_filter, int(time_period_days))
+            row = calculate_crypto_wallet_score(wallet, activity, wallet_chain, float(min_transaction_size))
+            last_activity = last_times.get(wallet) or crypto_last_activity_from_rows(activity)
+            persist_crypto_watchlist_metrics(wallet, row, last_activity)
+            ranked_lookup[wallet] = {**ranked_lookup.get(wallet, {}), **row}
+            status[wallet] = "Ready"
+        except CryptoAPIError:
+            logger.warning("Could not hydrate crypto watchlist metrics for %s", wallet, exc_info=True)
+            status[wallet] = "Unavailable"
+    return status
+
+
 def render_crypto_watchlist(
     chain: str,
     token_filter: str,
@@ -2838,24 +2992,39 @@ def render_crypto_watchlist(
             frame["wallet"] = wallet
             frames.append(frame)
     activity_df = pd.concat(frames, ignore_index=True).sort_values("timestamp_raw", ascending=False) if frames else pd.DataFrame()
+    last_times = last_trade_times_from_df(activity_df.rename(columns={"dollar_value": "value"})) if not activity_df.empty else {}
+    metric_status = hydrate_crypto_watchlist_metrics(
+        chain,
+        token_filter,
+        int(time_period_days),
+        float(alert_min_trade_value),
+        ranked_lookup,
+        last_times,
+    )
     detect_crypto_alerts(activity_df, float(alert_min), ranked_lookup)
     render_crypto_new_alerts(ranked_lookup)
     render_compact_title("Saved Crypto Wallets")
-    header = st.columns([1.25, 5, 1.25, 1.35, 1.05, 2, 1])
-    for col, title in zip(header, ["Tier", "Wallet address", "Whale score", "Net profit", "ROI", "Last activity", "Remove"]):
+    header = st.columns([1.2, 4.4, 1.15, 1.25, 1.25, 1.35, 1.35, 1.75, 1])
+    for col, title in zip(
+        header,
+        ["Tier", "Wallet address", "Win Rate", "Estimated ROI", "Whale Score", "Net Profit", "Total Volume", "Last Activity", "Remove"],
+    ):
         col.markdown(f'<div class="ww-watchlist-head">{title}</div>', unsafe_allow_html=True)
-    last_times = last_trade_times_from_df(activity_df.rename(columns={"dollar_value": "value"})) if not activity_df.empty else {}
     for item in list(st.session_state["crypto_watchlist_items"]):
         wallet = str(item.get("wallet", "")).lower()
         merged = {**item, **ranked_lookup.get(wallet, {})}
-        cols = st.columns([1.25, 5, 1.25, 1.35, 1.05, 2, 1])
+        fallback = metric_status.get(wallet, "Calculating...")
+        last_activity = last_times.get(wallet) or str(merged.get("last_activity") or "")
+        cols = st.columns([1.2, 4.4, 1.15, 1.25, 1.25, 1.35, 1.35, 1.75, 1])
         cols[0].markdown(tier_html(crypto_wallet_tier(wallet, ranked_lookup)), unsafe_allow_html=True)
         cols[1].markdown(f'<span class="ww-wallet-address compact">{html.escape(wallet)}</span>', unsafe_allow_html=True)
-        cols[2].write("" if merged.get("whale_score") is None else f"{safe_number(merged.get('whale_score')):.2f}")
-        cols[3].write("" if merged.get("net_profit") is None else format_money(merged.get("net_profit")))
-        cols[4].write("" if merged.get("roi_pct") is None else format_percent(merged.get("roi_pct")))
-        cols[5].write(last_times.get(wallet, "N/A"))
-        if cols[6].button("Remove", key=f"remove-crypto-{wallet}"):
+        cols[2].write(watchlist_metric_text(merged.get("win_rate"), format_percent, fallback))
+        cols[3].write(watchlist_metric_text(merged.get("roi_pct") if merged.get("roi_pct") is not None else merged.get("roi"), format_percent, fallback))
+        cols[4].write(watchlist_metric_text(merged.get("whale_score"), lambda value: f"{value:.2f}", fallback))
+        cols[5].write(watchlist_metric_text(merged.get("net_profit"), format_money, fallback))
+        cols[6].write(watchlist_metric_text(merged.get("total_volume"), format_money, fallback))
+        cols[7].write(last_activity or fallback)
+        if cols[8].button("Remove", key=f"remove-crypto-{wallet}"):
             remove_crypto_wallet_from_watchlist(wallet)
             st.rerun()
     if auto_refresh:

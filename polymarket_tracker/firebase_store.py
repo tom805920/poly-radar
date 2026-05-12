@@ -207,20 +207,26 @@ class FirebaseStore:
         wallet_address: str,
         wallet_label: str | None = None,
         collection: str = "polymarket_watchlist",
+        metadata: dict | None = None,
     ) -> list[dict]:
         wallet = wallet_address.lower()
         now = self._now_timestamp()
+        values = {
+            "wallet_address": wallet,
+            "wallet_label": wallet_label or "",
+            "created_at": now,
+            "updated_at": now,
+        }
+        if metadata:
+            values.update(metadata)
+            values["wallet_address"] = wallet
+            values["wallet_label"] = wallet_label or str(metadata.get("wallet_label") or "")
+            values["updated_at"] = now
         response = self._request(
             "PATCH",
             self._doc_url("users", user_id, collection, wallet),
             headers=self._auth_headers(id_token),
-            json=self._fields(
-                {
-                    "wallet_address": wallet,
-                    "wallet_label": wallet_label or "",
-                    "created_at": now,
-                }
-            ),
+            json=self._fields(values),
         )
         document = self._handle_response(response) or {}
         return [self._normalize_watchlist_doc(document, user_id)]
@@ -246,7 +252,7 @@ class FirebaseStore:
     def _normalize_watchlist_doc(self, document: dict, user_id: str) -> dict:
         fields = self._document_fields(document)
         wallet = str(fields.get("wallet_address") or document.get("name", "").rsplit("/", 1)[-1]).lower()
-        return {
+        row = {
             "id": wallet,
             "user_id": user_id,
             "wallet": wallet,
@@ -254,6 +260,10 @@ class FirebaseStore:
             "wallet_label": fields.get("wallet_label") or "",
             "created_at": fields.get("created_at"),
         }
+        for key, value in fields.items():
+            if key not in row:
+                row[key] = value
+        return row
 
     def fetch_user_settings(self, id_token: str, user_id: str) -> dict:
         response = self._request(

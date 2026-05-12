@@ -202,7 +202,7 @@ def inject_whalewatch_theme() -> None:
             height: 100%;
             object-fit: contain;
             display: block;
-            filter: drop-shadow(0 0 18px rgba(25, 184, 255, 0.18));
+            filter: brightness(0) invert(1) drop-shadow(0 0 18px rgba(237, 246, 255, 0.18));
         }
 
         .ww-logo-small {

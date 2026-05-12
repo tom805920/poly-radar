@@ -61,7 +61,7 @@ The CLOB `prices-history` endpoint is treated as best-effort. The app never asks
 
 Fast Mode scans recent trades, analyzes the selected number of candidate wallets, skips price history and deep wallet history, and respects the sidebar runtime/API-call limits. In Whale Mode, Fast Mode is best treated as a quick whale-candidate scan; turn it off for net profit and resolved-market whale filters.
 
-The Crypto tab uses public on-chain wallet activity through Etherscan/BscScan-style APIs where configured. For MVP scoring, it focuses on large stable-token transfers as a proxy for whale activity. Realized P/L and win rate are not reliably calculable from transfer history alone, so the UI labels those as unavailable rather than guessing.
+The Crypto tab uses public on-chain wallet activity through Etherscan/BscScan-style APIs where configured. Discovery scans recent ERC-20 `Transfer` logs for large stable-token movement, expands optional seed wallets through wallet transaction history, and includes recent native transfers for wallet detail/scoring context. Realized P/L and win rate are not reliably calculable from transfer history alone, so the UI labels those as unavailable rather than guessing.
 
 ## Install
 

@@ -20,6 +20,7 @@ from polymarket_tracker.api import (
 from polymarket_tracker.db import connect, get_cache, save_wallet_score, set_cache
 from polymarket_tracker.crypto import (
     CHAIN_CONFIGS,
+    CryptoAPIError,
     calculate_crypto_wallet_score,
     discover_crypto_whales,
     fetch_crypto_recent_trades,
@@ -2422,9 +2423,13 @@ def crypto_rows_for_wallets(
     total = len(wallets)
     for index, wallet in enumerate(wallets, start=1):
         progress_text.markdown(f"Analyzing crypto wallet {index}/{total}")
-        activity = cached_crypto_wallet_activity(wallet, chain, api_key, token_filter, int(time_period_days))
-        row = calculate_crypto_wallet_score(wallet, activity, chain, float(min_transaction_size))
-        rows.append(row)
+        try:
+            activity = cached_crypto_wallet_activity(wallet, chain, api_key, token_filter, int(time_period_days))
+            row = calculate_crypto_wallet_score(wallet, activity, chain, float(min_transaction_size))
+            rows.append(row)
+        except CryptoAPIError as exc:
+            logger.warning("Skipped crypto wallet %s", wallet, exc_info=True)
+            st.warning(f"{wallet}: explorer data unavailable; skipped. {exc}")
         progress_bar.progress(index / max(total, 1))
     progress_text.empty()
     progress_bar.empty()
@@ -2439,7 +2444,12 @@ def crypto_activity_dataframe(
     ranked_lookup: dict[str, dict] | None = None,
 ) -> pd.DataFrame:
     api_key = crypto_api_key(chain)
-    activity = cached_crypto_recent_trades(wallet, chain, api_key, token_filter, int(time_period_days))
+    try:
+        activity = cached_crypto_recent_trades(wallet, chain, api_key, token_filter, int(time_period_days))
+    except CryptoAPIError as exc:
+        logger.warning("Could not load crypto activity for %s", wallet, exc_info=True)
+        st.warning(f"Crypto activity unavailable for this wallet: {exc}")
+        return pd.DataFrame()
     rows = []
     for transfer in activity:
         from_wallet = str(transfer.get("from") or "").lower()
@@ -2816,29 +2826,36 @@ def render_crypto_platform(
     api_key = crypto_api_key(chain)
     seed_wallets = tuple(normalize_wallets(seed_wallet_text))
     if discover_crypto:
-        with st.spinner("Scanning public on-chain transfers..."):
-            wallets = cached_discover_crypto_whales(
-                chain,
-                api_key,
-                token_filter,
-                float(min_transaction_size),
-                int(max_wallets),
-                int(time_period_days),
-                bool(include_cex_related),
-                seed_wallets,
-            )
-            st.session_state["crypto_discovered_wallets"] = wallets
-            st.session_state["crypto_rows"] = crypto_rows_for_wallets(
-                wallets,
-                chain,
-                token_filter,
-                int(time_period_days),
-                float(min_transaction_size),
-            )
-        if wallets:
-            st.success("Fetched public on-chain activity successfully.")
+        if not api_key:
+            st.error(f"{chain} scanning needs an explorer API key in `.streamlit/secrets.toml`.")
         else:
-            st.warning("No crypto whale candidates found. Add explorer API keys, seed wallets, or lower the transfer threshold.")
+            try:
+                with st.spinner("Scanning public on-chain transfers..."):
+                    wallets = cached_discover_crypto_whales(
+                        chain,
+                        api_key,
+                        token_filter,
+                        float(min_transaction_size),
+                        int(max_wallets),
+                        int(time_period_days),
+                        bool(include_cex_related),
+                        seed_wallets,
+                    )
+                    st.session_state["crypto_discovered_wallets"] = wallets
+                    st.session_state["crypto_rows"] = crypto_rows_for_wallets(
+                        wallets,
+                        chain,
+                        token_filter,
+                        int(time_period_days),
+                        float(min_transaction_size),
+                    )
+                if wallets:
+                    st.success("Fetched public on-chain activity successfully.")
+                else:
+                    st.warning("No crypto whale candidates found. Lower the transfer threshold or try a shorter time window/token.")
+            except CryptoAPIError as exc:
+                logger.warning("Crypto discovery failed", exc_info=True)
+                st.error(f"Crypto scanner stopped: {exc}")
     rows = st.session_state.get("crypto_rows", [])
     ranked_lookup = {str(row["wallet"]).lower(): row for row in rows if row.get("wallet")}
     if crypto_page == "Watchlist":

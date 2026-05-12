@@ -2583,6 +2583,78 @@ def crypto_wallet_badge_html(wallet: str, ranked_lookup: dict[str, dict] | None 
     )
 
 
+CRYPTO_TIMESTAMP_FIELDS = ["timestamp_raw", "timestamp", "timeStamp", "datetime", "blockTime", "created_at"]
+
+
+def crypto_timestamp_to_raw(value) -> int:
+    if value is None:
+        return 0
+    try:
+        if pd.isna(value):
+            return 0
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if math.isnan(number) or math.isinf(number):
+            return 0
+        if number > 10_000_000_000:
+            number = number / 1000
+        return max(0, int(number))
+    text = str(value).strip()
+    if not text:
+        return 0
+    try:
+        if text.startswith("0x"):
+            return int(text, 16)
+        number = float(text)
+        if number > 10_000_000_000:
+            number = number / 1000
+        return max(0, int(number))
+    except (TypeError, ValueError):
+        pass
+    try:
+        parsed = pd.to_datetime(text, utc=True, errors="coerce")
+        if pd.isna(parsed):
+            return 0
+        return max(0, int(parsed.timestamp()))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def crypto_row_timestamp_raw(row: dict | pd.Series) -> int:
+    for field in CRYPTO_TIMESTAMP_FIELDS:
+        if hasattr(row, "get") and field in row:
+            timestamp_raw = crypto_timestamp_to_raw(row.get(field))
+            if timestamp_raw:
+                return timestamp_raw
+    return 0
+
+
+def normalize_crypto_activity_df(df: pd.DataFrame | None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame() if df is None else df.copy()
+    normalized = df.copy()
+    if "timestamp_raw" not in normalized.columns:
+        normalized["timestamp_raw"] = 0
+    normalized["timestamp_raw"] = normalized.apply(crypto_row_timestamp_raw, axis=1)
+    if "timestamp" not in normalized.columns:
+        normalized["timestamp"] = normalized["timestamp_raw"].apply(
+            lambda value: time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(int(value))) if int(value or 0) else ""
+        )
+    return normalized
+
+
+def safe_sort_crypto_activity(df: pd.DataFrame | None, ascending: bool = False) -> pd.DataFrame:
+    normalized = normalize_crypto_activity_df(df)
+    if normalized.empty:
+        return normalized
+    sort_col = "timestamp_raw" if "timestamp_raw" in normalized.columns else None
+    if sort_col is None:
+        return normalized
+    return normalized.sort_values(sort_col, ascending=ascending)
+
+
 def build_crypto_activity_events_resilient(wallet: str, activity: list[dict], chain: str) -> list[dict]:
     try:
         from polymarket_tracker import crypto as crypto_module
@@ -2603,7 +2675,7 @@ def build_crypto_activity_events_resilient(wallet: str, activity: list[dict], ch
     for tx_hash, rows in groups.items():
         incoming = [row for row in rows if str(row.get("to") or "").lower() == wallet and float(row.get("amount") or 0) > 0]
         outgoing = [row for row in rows if str(row.get("from") or "").lower() == wallet and float(row.get("amount") or 0) > 0]
-        timestamp_raw = max(int(row.get("timestamp_raw") or 0) for row in rows)
+        timestamp_raw = max(crypto_row_timestamp_raw(row) for row in rows)
         timestamp = pd.to_datetime(timestamp_raw, unit="s", utc=True).strftime("%Y-%m-%d %H:%M UTC") if timestamp_raw else ""
         if incoming and outgoing:
             sold = max(outgoing, key=lambda row: float(row.get("value_usd") or row.get("amount") or 0))
@@ -2655,7 +2727,7 @@ def build_crypto_activity_events_resilient(wallet: str, activity: list[dict], ch
                 "confidence": "Transfer",
             }
         )
-    return sorted(events, key=lambda row: (0 if row.get("category") == "Trades / Swaps" else 1, -int(row.get("timestamp_raw") or 0)))
+    return sorted(events, key=lambda row: (0 if row.get("category") == "Trades / Swaps" else 1, -crypto_row_timestamp_raw(row)))
 
 
 def crypto_rows_for_wallets(
@@ -2705,7 +2777,7 @@ def crypto_activity_dataframe(
         row = dict(event)
         row["wallet_label"] = crypto_wallet_label_text(wallet, ranked_lookup)
         rows.append(row)
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+    return safe_sort_crypto_activity(pd.DataFrame(rows)) if rows else pd.DataFrame()
 
 
 def render_crypto_selected_wallet_panel(selected_wallet: str, selected_metadata: dict | None) -> None:
@@ -2789,9 +2861,29 @@ def render_crypto_selected_wallet_panel(selected_wallet: str, selected_metadata:
 
 
 def render_crypto_activity_table(trade_df: pd.DataFrame) -> None:
+    trade_df = normalize_crypto_activity_df(trade_df)
     if trade_df.empty:
         render_empty_state("No matching activity", "No public on-chain swaps or transfers matched these filters.")
         return
+    defaults = {
+        "wallet_label": "",
+        "chain": "",
+        "timestamp": "",
+        "category": "",
+        "action": "",
+        "description": "",
+        "token_sold": "",
+        "token_bought": "",
+        "amount_sold": 0.0,
+        "amount_bought": 0.0,
+        "dollar_value": 0.0,
+        "confidence": "",
+        "tx_hash": "",
+        "explorer_link": "",
+    }
+    for column, default in defaults.items():
+        if column not in trade_df.columns:
+            trade_df[column] = default
     display_df = trade_df[
         [
             "wallet_label",
@@ -2862,8 +2954,13 @@ def render_crypto_wallet_details(
     lookback_label = filter_cols[2].selectbox("Time window", ["Last 24h", "Last 7d", "Last 30d", "Selected period"], index=3)
     lookback_days = {"Last 24h": 1, "Last 7d": 7, "Last 30d": 30, "Selected period": int(time_period_days)}[lookback_label]
     trade_df = crypto_activity_dataframe(viewer_wallet, chain, token_filter, lookback_days, ranked_lookup)
+    trade_df = normalize_crypto_activity_df(trade_df)
     if not trade_df.empty:
-        trade_df = trade_df[trade_df["dollar_value"] >= float(min_value)]
+        if "dollar_value" not in trade_df.columns:
+            trade_df["dollar_value"] = 0.0
+        if "category" not in trade_df.columns:
+            trade_df["category"] = ""
+        trade_df = trade_df[pd.to_numeric(trade_df["dollar_value"], errors="coerce").fillna(0) >= float(min_value)]
         if activity_filter == "Swaps only":
             trade_df = trade_df[trade_df["category"] == "Trades / Swaps"]
         elif activity_filter == "Transfers only":
@@ -2871,7 +2968,7 @@ def render_crypto_wallet_details(
     render_crypto_activity_table(trade_df)
 
 
-def detect_crypto_alerts(activity_df: pd.DataFrame, min_trade_value: float, ranked_lookup: dict[str, dict]) -> None:
+def detect_crypto_alerts(activity_df: pd.DataFrame, min_trade_value: float, ranked_lookup: dict[str, dict]) -> list[dict]:
     seen_ids = {str(item) for item in st.session_state.get("crypto_seen_trade_ids", [])}
     seen_timestamps = {
         str(key): int(value or 0)
@@ -2881,23 +2978,33 @@ def detect_crypto_alerts(activity_df: pd.DataFrame, min_trade_value: float, rank
         str(wallet).lower()
         for wallet in st.session_state.get("crypto_alert_wallets_initialized", [])
     }
+    activity_df = normalize_crypto_activity_df(activity_df)
     if activity_df.empty:
         initialized_wallets.update(st.session_state["crypto_watchlist"])
         st.session_state["crypto_alert_wallets_initialized"] = sorted(initialized_wallets)
-        return
+        return []
+    for column, default in {"wallet": "", "tx_hash": "", "dollar_value": 0.0, "category": ""}.items():
+        if column not in activity_df.columns:
+            activity_df[column] = default
+    activity_df["dollar_value"] = pd.to_numeric(activity_df["dollar_value"], errors="coerce").fillna(0)
     new_alerts = []
     for wallet in st.session_state["crypto_watchlist"]:
         wallet_rows = activity_df[activity_df["wallet"].astype(str).str.lower() == wallet] if "wallet" in activity_df.columns else pd.DataFrame()
         if wallet not in initialized_wallets:
+            wallet_rows = normalize_crypto_activity_df(wallet_rows)
             for _, row in wallet_rows.iterrows():
                 trade_id = str(row.get("tx_hash") or "")
                 if trade_id:
                     seen_ids.add(trade_id)
-                    seen_timestamps[trade_id] = int(row.get("timestamp_raw") or 0)
+                    seen_timestamps[trade_id] = crypto_row_timestamp_raw(row)
             initialized_wallets.add(wallet)
             continue
         unseen = wallet_rows[~wallet_rows["tx_hash"].astype(str).isin(seen_ids)] if not wallet_rows.empty else pd.DataFrame()
         if not unseen.empty:
+            for column, default in {"dollar_value": 0.0, "category": ""}.items():
+                if column not in unseen.columns:
+                    unseen[column] = default
+            unseen["dollar_value"] = pd.to_numeric(unseen["dollar_value"], errors="coerce").fillna(0)
             alert_categories = ["Trades / Swaps", "Large Transfers"]
             eligible = unseen[
                 (unseen["dollar_value"] >= float(min_trade_value))
@@ -2905,7 +3012,15 @@ def detect_crypto_alerts(activity_df: pd.DataFrame, min_trade_value: float, rank
             ]
         else:
             eligible = pd.DataFrame()
-        for _, row in eligible.sort_values("timestamp_raw", ascending=False).iterrows():
+        if eligible.empty:
+            continue
+        eligible = safe_sort_crypto_activity(eligible)
+        sort_col = "timestamp_raw" if "timestamp_raw" in eligible.columns else None
+        if sort_col is None:
+            sorted_eligible = eligible
+        else:
+            sorted_eligible = eligible.sort_values(sort_col, ascending=False)
+        for _, row in sorted_eligible.iterrows():
             alert = row.to_dict()
             alert["wallet_tier"] = crypto_wallet_tier(wallet, ranked_lookup)
             new_alerts.append(alert)
@@ -2917,12 +3032,13 @@ def detect_crypto_alerts(activity_df: pd.DataFrame, min_trade_value: float, rank
             trade_id = str(row.get("tx_hash") or "")
             if trade_id:
                 seen_ids.add(trade_id)
-                seen_timestamps[trade_id] = int(row.get("timestamp_raw") or 0)
+                seen_timestamps[trade_id] = crypto_row_timestamp_raw(row)
     st.session_state["crypto_seen_trade_ids"] = sorted(seen_ids)
     st.session_state["crypto_seen_trade_timestamps"] = seen_timestamps
     st.session_state["crypto_alert_wallets_initialized"] = sorted(initialized_wallets)
     if new_alerts:
         st.session_state["crypto_new_trade_alerts"] = (new_alerts + st.session_state.get("crypto_new_trade_alerts", []))[:50]
+    return new_alerts
 
 
 def render_crypto_new_alerts(ranked_lookup: dict[str, dict]) -> None:
@@ -2955,7 +3071,7 @@ def render_crypto_new_alerts(ranked_lookup: dict[str, dict]) -> None:
 
 
 def crypto_last_activity_from_rows(rows: list[dict]) -> str:
-    timestamps = [int(row.get("timestamp_raw") or 0) for row in rows if int(row.get("timestamp_raw") or 0) > 0]
+    timestamps = [crypto_row_timestamp_raw(row) for row in rows if crypto_row_timestamp_raw(row) > 0]
     if not timestamps:
         return ""
     latest = max(timestamps)
@@ -3046,7 +3162,7 @@ def render_crypto_watchlist(
         if not frame.empty:
             frame["wallet"] = wallet
             frames.append(frame)
-    activity_df = pd.concat(frames, ignore_index=True).sort_values("timestamp_raw", ascending=False) if frames else pd.DataFrame()
+    activity_df = safe_sort_crypto_activity(pd.concat(frames, ignore_index=True)) if frames else pd.DataFrame()
     last_times = last_trade_times_from_df(activity_df.rename(columns={"dollar_value": "value"})) if not activity_df.empty else {}
     metric_status = hydrate_crypto_watchlist_metrics(
         chain,

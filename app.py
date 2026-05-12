@@ -2897,7 +2897,7 @@ with st.sidebar:
     if st.button("Logout"):
         sign_out()
     if market_tab == "Crypto":
-        crypto_page = st.radio("Crypto Page", ["Dashboard", "Wallet Details", "Watchlist"])
+        crypto_page = st.radio("Crypto", ["Dashboard", "Wallet Details", "Watchlist"])
         st.header("Crypto Discovery")
         crypto_chain = st.selectbox("Chain", list(CHAIN_CONFIGS.keys()))
         token_options = ["All"] + list(CHAIN_CONFIGS[crypto_chain]["stable_tokens"].keys())
@@ -2929,7 +2929,7 @@ with st.sidebar:
             help="For MVP transfer data this is usually not calculable and remains 0.",
         )
     else:
-        page = st.radio("Page", ["Dashboard", "Wallet Details", "Watchlist"])
+        page = st.radio("Polymarket", ["Dashboard", "Wallet Details", "Watchlist"])
         st.header("Discovery")
         whale_mode = st.checkbox(
             "Whale Mode",

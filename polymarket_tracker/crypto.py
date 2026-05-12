@@ -87,6 +87,44 @@ PUBLIC_CEX_RELATED_WALLETS = {
 }
 
 
+QUOTE_TOKENS = {"ETH", "WETH", "BNB", "WBNB", "USDT", "USDC", "USDBC", "DAI"}
+
+
+DEX_ROUTER_CONTRACTS = {
+    "Ethereum": {
+        "0x7a250d5630b4cf539739df2c5dacb4c659f2488d": "Uniswap V2",
+        "0xe592427a0aece92de3edee1f18e0157c05861564": "Uniswap V3",
+        "0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45": "Uniswap V3",
+        "0xef1c6e67703c7bd7107eed8303fbe6ec2554bf6b": "Uniswap Universal Router",
+        "0xd9e1ce17f2641f24ae83637ab66a2cca9c378b9f": "SushiSwap",
+        "0x1111111254eeb25477b68fb85ed929f73a960582": "1inch",
+        "0x1111111254fb6c44bac0bed2854e76f90643097d": "1inch",
+        "0xba12222222228d8ba445958a75a0704d566bf2c8": "Balancer",
+        "0xdef1c0ded9bec7f1a1670819833240f027b25eff": "0x",
+    },
+    "BNB Chain": {
+        "0x10ed43c718714eb63d5aa57b78b54704e256024e": "PancakeSwap V2",
+        "0x13f4ea83d0bd40e75c8222255bc855a974568dd4": "PancakeSwap V3",
+        "0x1111111254eeb25477b68fb85ed929f73a960582": "1inch",
+        "0x1111111254fb6c44bac0bed2854e76f90643097d": "1inch",
+        "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506": "SushiSwap",
+    },
+    "Base": {
+        "0x3fC91A3afd70395CD496C647d5a6CC9D4B2b7FAD": "Uniswap Universal Router",
+        "0x2626664c2603336E57B271c5C0b26F421741e481": "Uniswap V3",
+        "0x1111111254eeb25477b68fb85ed929f73a960582": "1inch",
+        "0xdef1c0ded9bec7f1a1670819833240f027b25eff": "0x",
+    },
+    "Arbitrum": {
+        "0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45": "Uniswap V3",
+        "0x5e325eda8064b456f4781070c0738d849c824258": "Uniswap Universal Router",
+        "0x1111111254eeb25477b68fb85ed929f73a960582": "1inch",
+        "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506": "SushiSwap",
+        "0xba12222222228d8ba445958a75a0704d566bf2c8": "Balancer",
+    },
+}
+
+
 def _request_json(url: str, params: dict, context: str = "Explorer request") -> dict:
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
     last_error: Exception | None = None
@@ -200,6 +238,7 @@ def _normalize_transfer(row: dict, chain: str, fallback_symbol: str, fallback_de
         "value_usd": amount if symbol.upper() in {"USDT", "USDC", "USDBC", "DAI"} else 0.0,
         "timestamp_raw": timestamp,
         "timestamp": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(timestamp)) if timestamp else "",
+        "source": "erc20_transfer",
     }
 
 
@@ -280,17 +319,33 @@ def _fetch_token_transfers(
 ) -> list[dict]:
     params = {
         "action": "tokentx",
-        "contractaddress": contract,
         "page": 1,
         "offset": offset,
         "sort": "desc",
     }
+    if contract:
+        params["contractaddress"] = contract
     if address:
         params["address"] = address
     url, merged = _api_params(chain, api_key, **params)
     payload = _request_json(url, merged)
     result = _result_list(payload, f"{chain} {symbol} token transfers")
     return [_normalize_transfer(row, chain, symbol, decimals) for row in result if isinstance(row, dict)]
+
+
+def _fetch_wallet_token_transfers(chain: str, api_key: str | None, address: str, offset: int = 500) -> list[dict]:
+    url, params = _api_params(
+        chain,
+        api_key,
+        action="tokentx",
+        address=address,
+        page=1,
+        offset=offset,
+        sort="desc",
+    )
+    payload = _request_json(url, params, context=f"{chain} token transfers")
+    result = _result_list(payload, f"{chain} token transfers")
+    return [_normalize_transfer(row, chain, "", 18) for row in result if isinstance(row, dict)]
 
 
 def _normalize_native_tx(row: dict, chain: str, wallet: str) -> dict:
@@ -308,6 +363,8 @@ def _normalize_native_tx(row: dict, chain: str, wallet: str) -> dict:
         "hash": str(row.get("hash") or ""),
         "from": str(row.get("from") or "").lower(),
         "to": str(row.get("to") or "").lower(),
+        "method_id": str(row.get("methodId") or ""),
+        "function_name": str(row.get("functionName") or ""),
         "token": symbol,
         "amount": amount,
         "value_usd": amount * native_usd,
@@ -417,23 +474,14 @@ def fetch_crypto_wallet_activity(
         return []
     wallet = str(wallet).lower()
     since_ts = int(time.time()) - int(time_period_days) * 24 * 3600
-    config = CHAIN_CONFIGS[chain]
-    token_items = config["stable_tokens"].items()
-    if token_filter and token_filter != "All":
-        token_items = [(token_filter, config["stable_tokens"][token_filter])] if token_filter in config["stable_tokens"] else []
     transfers: list[dict] = []
-    for symbol, token in token_items:
-        transfers.extend(
-            _fetch_token_transfers(
-                chain,
-                api_key,
-                token["contract"],
-                symbol,
-                int(token["decimals"]),
-                address=wallet,
-                offset=200,
-            )
-        )
+    token_transfers = _fetch_wallet_token_transfers(chain, api_key, wallet, offset=500)
+    if token_filter and token_filter != "All":
+        token_transfers = [
+            row for row in token_transfers
+            if str(row.get("token") or "").upper() == str(token_filter).upper()
+        ]
+    transfers.extend(token_transfers)
     native_transfers = _fetch_native_transactions(chain, api_key, wallet, offset=100)
     transfers.extend(native_transfers)
     filtered = [row for row in transfers if int(row.get("timestamp_raw") or 0) >= since_ts]
@@ -454,6 +502,169 @@ def fetch_crypto_token_balances(wallet: str, chain: str, api_key: str | None = N
     # Placeholder adapter: balances vary heavily by provider. Kept separate so a richer provider
     # can be swapped in without touching the UI/scoring code.
     return []
+
+
+def _explorer_tx_url(chain: str, tx_hash: str) -> str:
+    base = CHAIN_CONFIGS[chain]["explorer"].split("/address/")[0]
+    return f"{base}/tx/{tx_hash}" if tx_hash else ""
+
+
+def _is_router(chain: str, address: str) -> bool:
+    routers = {key.lower(): value for key, value in DEX_ROUTER_CONTRACTS.get(chain, {}).items()}
+    return str(address or "").lower() in routers
+
+
+def _router_name(chain: str, address: str) -> str:
+    routers = {key.lower(): value for key, value in DEX_ROUTER_CONTRACTS.get(chain, {}).items()}
+    return routers.get(str(address or "").lower(), "")
+
+
+def _is_public_cex_wallet(chain: str, address: str) -> bool:
+    address = str(address or "").lower()
+    return address in {wallet.lower() for wallet in PUBLIC_CEX_RELATED_WALLETS.get(chain, [])}
+
+
+def _asset_value_usd(asset: dict) -> float:
+    symbol = str(asset.get("token") or "").upper()
+    amount = float(asset.get("amount") or 0)
+    if symbol in {"USDT", "USDC", "USDBC", "DAI"}:
+        return amount
+    return float(asset.get("value_usd") or 0)
+
+
+def _best_asset(assets: list[dict]) -> dict:
+    if not assets:
+        return {}
+    return sorted(
+        assets,
+        key=lambda row: (_asset_value_usd(row), float(row.get("amount") or 0)),
+        reverse=True,
+    )[0]
+
+
+def _counterparty(row: dict, wallet: str) -> str:
+    from_wallet = str(row.get("from") or "").lower()
+    to_wallet = str(row.get("to") or "").lower()
+    if from_wallet == wallet:
+        return to_wallet
+    if to_wallet == wallet:
+        return from_wallet
+    return to_wallet or from_wallet
+
+
+def _tx_router_context(chain: str, rows: list[dict], wallet: str) -> tuple[bool, str]:
+    for row in rows:
+        for address in [row.get("from"), row.get("to"), _counterparty(row, wallet)]:
+            if _is_router(chain, str(address or "")):
+                return True, _router_name(chain, str(address or ""))
+        function_name = str(row.get("function_name") or "").lower()
+        if any(word in function_name for word in ["swap", "multicall", "exactinput", "unoswap", "uniswap"]):
+            return True, "DEX router"
+    return False, ""
+
+
+def _action_for_swap(sold_symbol: str, bought_symbol: str, confirmed: bool) -> tuple[str, str]:
+    sold_quote = sold_symbol.upper() in QUOTE_TOKENS
+    bought_quote = bought_symbol.upper() in QUOTE_TOKENS
+    prefix = "" if confirmed else "Possible swap: "
+    if sold_quote and not bought_quote:
+        return "BUY", f"{prefix}Bought {bought_symbol} with {sold_symbol}"
+    if bought_quote and not sold_quote:
+        return "SELL", f"{prefix}Sold {sold_symbol} for {bought_symbol}"
+    return "SWAP", f"{prefix}Swapped {sold_symbol} -> {bought_symbol}"
+
+
+def build_crypto_activity_events(wallet: str, transfers: list[dict], chain: str) -> list[dict]:
+    wallet = str(wallet).lower()
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for transfer in transfers:
+        tx_hash = str(transfer.get("hash") or "")
+        if tx_hash:
+            groups[tx_hash].append(transfer)
+
+    events = []
+    for tx_hash, rows in groups.items():
+        outgoing = [
+            row for row in rows
+            if str(row.get("from") or "").lower() == wallet and float(row.get("amount") or 0) > 0
+        ]
+        incoming = [
+            row for row in rows
+            if str(row.get("to") or "").lower() == wallet and float(row.get("amount") or 0) > 0
+        ]
+        timestamp_raw = max(int(row.get("timestamp_raw") or 0) for row in rows)
+        timestamp = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(timestamp_raw)) if timestamp_raw else ""
+        router_involved, router_name = _tx_router_context(chain, rows, wallet)
+
+        if incoming and outgoing:
+            sold = _best_asset(outgoing)
+            bought = _best_asset(incoming)
+            action, description = _action_for_swap(
+                str(sold.get("token") or "UNKNOWN"),
+                str(bought.get("token") or "UNKNOWN"),
+                router_involved,
+            )
+            estimated_value = max(_asset_value_usd(sold), _asset_value_usd(bought))
+            events.append(
+                {
+                    "wallet": wallet,
+                    "chain": chain,
+                    "timestamp_raw": timestamp_raw,
+                    "timestamp": timestamp,
+                    "category": "Trades / Swaps",
+                    "action": action,
+                    "description": description,
+                    "token_sold": sold.get("token") or "",
+                    "token_bought": bought.get("token") or "",
+                    "amount_sold": sold.get("amount") or 0,
+                    "amount_bought": bought.get("amount") or 0,
+                    "dollar_value": round(estimated_value, 2),
+                    "tx_hash": tx_hash,
+                    "explorer_link": _explorer_tx_url(chain, tx_hash),
+                    "confidence": "Confirmed swap" if router_involved else "Possible swap",
+                    "venue": router_name or "Unknown DEX",
+                }
+            )
+            continue
+
+        transfer = _best_asset(incoming or outgoing or rows)
+        direction = "Received" if incoming else "Sent" if outgoing else "Transfer"
+        token = str(transfer.get("token") or "")
+        amount = float(transfer.get("amount") or 0)
+        estimated_value = _asset_value_usd(transfer)
+        counterparty = _counterparty(transfer, wallet)
+        if estimated_value >= 10_000:
+            category = "Large Transfers"
+        elif _is_public_cex_wallet(chain, counterparty):
+            category = "Deposits / Withdrawals"
+        else:
+            category = "Unknown Activity"
+        events.append(
+            {
+                "wallet": wallet,
+                "chain": chain,
+                "timestamp_raw": timestamp_raw,
+                "timestamp": timestamp,
+                "category": category,
+                "action": "RECEIVE" if direction == "Received" else "SEND" if direction == "Sent" else "TRANSFER",
+                "description": f"{direction} {token}",
+                "token_sold": token if direction == "Sent" else "",
+                "token_bought": token if direction == "Received" else "",
+                "amount_sold": amount if direction == "Sent" else 0,
+                "amount_bought": amount if direction == "Received" else 0,
+                "dollar_value": round(estimated_value, 2),
+                "tx_hash": tx_hash,
+                "explorer_link": _explorer_tx_url(chain, tx_hash),
+                "confidence": "Transfer",
+                "venue": "",
+            }
+        )
+
+    category_rank = {"Trades / Swaps": 0, "Large Transfers": 1, "Deposits / Withdrawals": 2, "Unknown Activity": 3}
+    return sorted(
+        events,
+        key=lambda row: (category_rank.get(str(row.get("category")), 9), -int(row.get("timestamp_raw") or 0)),
+    )
 
 
 def calculate_crypto_wallet_score(

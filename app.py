@@ -2409,6 +2409,81 @@ def crypto_wallet_badge_html(wallet: str, ranked_lookup: dict[str, dict] | None 
     )
 
 
+def build_crypto_activity_events_resilient(wallet: str, activity: list[dict], chain: str) -> list[dict]:
+    try:
+        from polymarket_tracker import crypto as crypto_module
+
+        builder = getattr(crypto_module, "build_crypto_activity_events", None)
+        if builder:
+            return builder(wallet, activity, chain)
+    except Exception:
+        logger.warning("Falling back to local crypto activity grouping", exc_info=True)
+
+    wallet = str(wallet).lower()
+    groups: dict[str, list[dict]] = {}
+    for transfer in activity:
+        tx_hash = str(transfer.get("hash") or "")
+        if tx_hash:
+            groups.setdefault(tx_hash, []).append(transfer)
+    events = []
+    for tx_hash, rows in groups.items():
+        incoming = [row for row in rows if str(row.get("to") or "").lower() == wallet and float(row.get("amount") or 0) > 0]
+        outgoing = [row for row in rows if str(row.get("from") or "").lower() == wallet and float(row.get("amount") or 0) > 0]
+        timestamp_raw = max(int(row.get("timestamp_raw") or 0) for row in rows)
+        timestamp = pd.to_datetime(timestamp_raw, unit="s", utc=True).strftime("%Y-%m-%d %H:%M UTC") if timestamp_raw else ""
+        if incoming and outgoing:
+            sold = max(outgoing, key=lambda row: float(row.get("value_usd") or row.get("amount") or 0))
+            bought = max(incoming, key=lambda row: float(row.get("value_usd") or row.get("amount") or 0))
+            sold_token = str(sold.get("token") or "UNKNOWN")
+            bought_token = str(bought.get("token") or "UNKNOWN")
+            value = max(float(sold.get("value_usd") or 0), float(bought.get("value_usd") or 0))
+            description = f"Possible swap: Swapped {sold_token} -> {bought_token}"
+            events.append(
+                {
+                    "wallet": wallet,
+                    "chain": chain,
+                    "timestamp_raw": timestamp_raw,
+                    "timestamp": timestamp,
+                    "category": "Trades / Swaps",
+                    "action": "SWAP",
+                    "description": description,
+                    "token_sold": sold_token,
+                    "token_bought": bought_token,
+                    "amount_sold": sold.get("amount") or 0,
+                    "amount_bought": bought.get("amount") or 0,
+                    "dollar_value": round(value, 2),
+                    "tx_hash": tx_hash,
+                    "explorer_link": "",
+                    "confidence": "Possible swap",
+                }
+            )
+            continue
+        transfer = (incoming or outgoing or rows)[0]
+        direction = "Received" if incoming else "Sent" if outgoing else "Transfer"
+        token = str(transfer.get("token") or "")
+        value = float(transfer.get("value_usd") or 0)
+        events.append(
+            {
+                "wallet": wallet,
+                "chain": chain,
+                "timestamp_raw": timestamp_raw,
+                "timestamp": timestamp,
+                "category": "Large Transfers" if value >= 10000 else "Unknown Activity",
+                "action": "RECEIVE" if direction == "Received" else "SEND" if direction == "Sent" else "TRANSFER",
+                "description": f"{direction} {token}",
+                "token_sold": token if direction == "Sent" else "",
+                "token_bought": token if direction == "Received" else "",
+                "amount_sold": transfer.get("amount") if direction == "Sent" else 0,
+                "amount_bought": transfer.get("amount") if direction == "Received" else 0,
+                "dollar_value": round(value, 2),
+                "tx_hash": tx_hash,
+                "explorer_link": "",
+                "confidence": "Transfer",
+            }
+        )
+    return sorted(events, key=lambda row: (0 if row.get("category") == "Trades / Swaps" else 1, -int(row.get("timestamp_raw") or 0)))
+
+
 def crypto_rows_for_wallets(
     wallets: list[str],
     chain: str,
@@ -2450,28 +2525,13 @@ def crypto_activity_dataframe(
         logger.warning("Could not load crypto activity for %s", wallet, exc_info=True)
         st.warning(f"Crypto activity unavailable for this wallet: {exc}")
         return pd.DataFrame()
+    events = build_crypto_activity_events_resilient(wallet, activity, chain)
     rows = []
-    for transfer in activity:
-        from_wallet = str(transfer.get("from") or "").lower()
-        to_wallet = str(transfer.get("to") or "").lower()
-        wallet_key = str(wallet).lower()
-        direction = "In" if to_wallet == wallet_key else "Out" if from_wallet == wallet_key else "Transfer"
-        rows.append(
-            {
-                "wallet_label": crypto_wallet_label_text(wallet, ranked_lookup),
-                "chain": chain,
-                "direction": direction,
-                "token": transfer.get("token") or "",
-                "amount": transfer.get("amount") or 0,
-                "dollar_value": transfer.get("value_usd") or 0,
-                "timestamp_raw": transfer.get("timestamp_raw") or 0,
-                "timestamp": transfer.get("timestamp") or "",
-                "tx_hash": transfer.get("hash") or "",
-                "from": from_wallet,
-                "to": to_wallet,
-            }
-        )
-    return pd.DataFrame(rows).sort_values("timestamp_raw", ascending=False) if rows else pd.DataFrame()
+    for event in events:
+        row = dict(event)
+        row["wallet_label"] = crypto_wallet_label_text(wallet, ranked_lookup)
+        rows.append(row)
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
 def render_crypto_selected_wallet_panel(selected_wallet: str, selected_metadata: dict | None) -> None:
@@ -2523,10 +2583,25 @@ def render_crypto_selected_wallet_panel(selected_wallet: str, selected_metadata:
 
 def render_crypto_activity_table(trade_df: pd.DataFrame) -> None:
     if trade_df.empty:
-        render_empty_state("No matching activity", "No public on-chain transfers matched these filters.")
+        render_empty_state("No matching activity", "No public on-chain swaps or transfers matched these filters.")
         return
     display_df = trade_df[
-        ["wallet_label", "chain", "direction", "token", "amount", "dollar_value", "timestamp", "tx_hash"]
+        [
+            "wallet_label",
+            "chain",
+            "timestamp",
+            "category",
+            "action",
+            "description",
+            "token_sold",
+            "token_bought",
+            "amount_sold",
+            "amount_bought",
+            "dollar_value",
+            "confidence",
+            "tx_hash",
+            "explorer_link",
+        ]
     ].copy()
     st.dataframe(
         style_financial_table(display_df),
@@ -2535,12 +2610,18 @@ def render_crypto_activity_table(trade_df: pd.DataFrame) -> None:
         column_config={
             "wallet_label": st.column_config.TextColumn("Wallet", width=430),
             "chain": "Chain",
-            "direction": "Direction",
-            "token": "Token",
-            "amount": st.column_config.NumberColumn("Amount", format="%.4f"),
-            "dollar_value": st.column_config.NumberColumn("Value", format="$%.2f"),
             "timestamp": "Timestamp",
+            "category": "Category",
+            "action": "Action",
+            "description": st.column_config.TextColumn("Activity", width=260),
+            "token_sold": "Token sold",
+            "token_bought": "Token bought",
+            "amount_sold": st.column_config.NumberColumn("Amount sold", format="%.4f"),
+            "amount_bought": st.column_config.NumberColumn("Amount bought", format="%.4f"),
+            "dollar_value": st.column_config.NumberColumn("Estimated value", format="$%.2f"),
+            "confidence": "Confidence",
             "tx_hash": st.column_config.TextColumn("Transaction", width=260),
+            "explorer_link": st.column_config.LinkColumn("Explorer", display_text="Open"),
         },
     )
 
@@ -2569,15 +2650,17 @@ def render_crypto_wallet_details(
     )
     st.markdown(crypto_wallet_badge_html(viewer_wallet, ranked_lookup), unsafe_allow_html=True)
     filter_cols = st.columns([1, 1, 1])
-    min_value = filter_cols[0].number_input("Minimum transfer size", min_value=0.0, value=0.0, step=500.0)
-    direction = filter_cols[1].selectbox("Direction", ["All", "In", "Out"])
+    activity_filter = filter_cols[0].selectbox("Activity type", ["Swaps only", "Transfers only", "All activity"])
+    min_value = filter_cols[1].number_input("Minimum value", min_value=0.0, value=0.0, step=500.0)
     lookback_label = filter_cols[2].selectbox("Time window", ["Last 24h", "Last 7d", "Last 30d", "Selected period"], index=3)
     lookback_days = {"Last 24h": 1, "Last 7d": 7, "Last 30d": 30, "Selected period": int(time_period_days)}[lookback_label]
     trade_df = crypto_activity_dataframe(viewer_wallet, chain, token_filter, lookback_days, ranked_lookup)
     if not trade_df.empty:
         trade_df = trade_df[trade_df["dollar_value"] >= float(min_value)]
-        if direction != "All":
-            trade_df = trade_df[trade_df["direction"] == direction]
+        if activity_filter == "Swaps only":
+            trade_df = trade_df[trade_df["category"] == "Trades / Swaps"]
+        elif activity_filter == "Transfers only":
+            trade_df = trade_df[trade_df["category"].isin(["Large Transfers", "Deposits / Withdrawals"])]
     render_crypto_activity_table(trade_df)
 
 
@@ -2607,14 +2690,21 @@ def detect_crypto_alerts(activity_df: pd.DataFrame, min_trade_value: float, rank
             initialized_wallets.add(wallet)
             continue
         unseen = wallet_rows[~wallet_rows["tx_hash"].astype(str).isin(seen_ids)] if not wallet_rows.empty else pd.DataFrame()
-        eligible = unseen[unseen["dollar_value"] >= float(min_trade_value)] if not unseen.empty else pd.DataFrame()
+        if not unseen.empty:
+            alert_categories = ["Trades / Swaps", "Large Transfers"]
+            eligible = unseen[
+                (unseen["dollar_value"] >= float(min_trade_value))
+                & (unseen["category"].isin(alert_categories))
+            ]
+        else:
+            eligible = pd.DataFrame()
         for _, row in eligible.sort_values("timestamp_raw", ascending=False).iterrows():
             alert = row.to_dict()
             alert["wallet_tier"] = crypto_wallet_tier(wallet, ranked_lookup)
             new_alerts.append(alert)
             st.toast(
-                f"New on-chain whale transfer: {crypto_wallet_label_text(wallet, ranked_lookup)} "
-                f"{row.get('direction')} {format_money(row.get('dollar_value'))} {row.get('token')}"
+                f"New on-chain whale activity: {crypto_wallet_label_text(wallet, ranked_lookup)} "
+                f"{row.get('description')} ({format_money(row.get('dollar_value'))})"
             )
         for _, row in wallet_rows.iterrows():
             trade_id = str(row.get("tx_hash") or "")
@@ -2649,7 +2739,8 @@ def render_crypto_new_alerts(ranked_lookup: dict[str, dict]) -> None:
                 <div>{crypto_wallet_badge_html(wallet, ranked_lookup)}</div>
                 <div class="ww-num ww-num-positive">{format_money(value)}</div>
               </div>
-              <div class="ww-section-copy">{html.escape(str(alert.get("direction") or "Transfer"))} · {html.escape(str(alert.get("token") or ""))} · {html.escape(str(alert.get("timestamp") or ""))}</div>
+              <div class="ww-alert-market">{html.escape(str(alert.get("description") or "On-chain activity"))}</div>
+              <div class="ww-section-copy">{html.escape(str(alert.get("category") or ""))} · {html.escape(str(alert.get("confidence") or ""))} · {html.escape(str(alert.get("timestamp") or ""))}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -2801,8 +2892,11 @@ def render_crypto_dashboard(
         render_crypto_selected_wallet_panel(selected_wallet, selected_metadata)
         if st.session_state.get("show_selected_crypto_trades") == selected_wallet:
             ranked_lookup = {str(row["wallet"]).lower(): row.to_dict() for _, row in df.iterrows()}
-            render_compact_title("Recent On-Chain Activity")
+            render_compact_title("Trades / Swaps")
             trade_df = crypto_activity_dataframe(selected_wallet, chain, token_filter, time_period_days, ranked_lookup)
+            if not trade_df.empty:
+                swaps_df = trade_df[trade_df["category"] == "Trades / Swaps"]
+                trade_df = swaps_df if not swaps_df.empty else trade_df
             render_crypto_activity_table(trade_df)
     csv = df[columns].to_csv(index=False).encode("utf-8")
     st.download_button("Export crypto results to CSV", csv, "whalewatch_crypto_rankings.csv", "text/csv")

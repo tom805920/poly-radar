@@ -87,6 +87,13 @@ PUBLIC_CEX_RELATED_WALLETS = {
 }
 
 
+SYSTEM_WALLETS = {
+    "0x0000000000000000000000000000000000000000",
+    "0x000000000000000000000000000000000000dead",
+    "0x000000000000000000000000000000000000dEaD".lower(),
+}
+
+
 QUOTE_TOKENS = {"ETH", "WETH", "BNB", "WBNB", "USDT", "USDC", "USDBC", "DAI"}
 
 
@@ -402,6 +409,48 @@ def _seed_wallets_from_text(seed_wallets: list[str] | None) -> list[str]:
     return list(dict.fromkeys(wallets))
 
 
+def _known_contract_addresses(chain: str) -> set[str]:
+    routers = {address.lower() for address in DEX_ROUTER_CONTRACTS.get(chain, {})}
+    stable_tokens = {
+        str(token.get("contract") or "").lower()
+        for token in CHAIN_CONFIGS.get(chain, {}).get("stable_tokens", {}).values()
+        if token.get("contract")
+    }
+    return routers | stable_tokens
+
+
+def _is_excluded_crypto_wallet(chain: str, wallet: str) -> bool:
+    wallet = str(wallet or "").lower()
+    if not wallet.startswith("0x") or len(wallet) != 42:
+        return True
+    if wallet in SYSTEM_WALLETS:
+        return True
+    if _is_public_cex_wallet(chain, wallet):
+        return True
+    if wallet in _known_contract_addresses(chain):
+        return True
+    return False
+
+
+def _is_contract_address(chain: str, api_key: str | None, wallet: str) -> bool:
+    if not api_key:
+        return False
+    try:
+        url, params = _api_params(
+            chain,
+            api_key,
+            module="proxy",
+            action="eth_getCode",
+            address=str(wallet).lower(),
+            tag="latest",
+        )
+        payload = _request_json(url, params, context=f"{chain} contract check")
+        code = _result_hex(payload, f"{chain} contract check")
+        return code not in {"0x", "0x0", ""}
+    except CryptoAPIError:
+        return False
+
+
 def discover_crypto_whales(
     chain: str,
     api_key: str | None = None,
@@ -424,10 +473,12 @@ def discover_crypto_whales(
     config = CHAIN_CONFIGS[chain]
     wallet_volume: dict[str, float] = defaultdict(float)
     for wallet in _seed_wallets_from_text(seed_wallets):
-        wallet_volume[wallet] += float(min_transaction_size)
+        if not _is_excluded_crypto_wallet(chain, wallet):
+            wallet_volume[wallet] += float(min_transaction_size)
     if include_cex_related:
         for wallet in PUBLIC_CEX_RELATED_WALLETS.get(chain, []):
-            wallet_volume[wallet.lower()] += float(min_transaction_size)
+            # Public CEX wallets can be inspected manually, but they are not ranked as copyable traders.
+            continue
     token_items = config["stable_tokens"].items()
     if token_filter and token_filter != "All":
         token_items = [(token_filter, config["stable_tokens"][token_filter])] if token_filter in config["stable_tokens"] else []
@@ -450,7 +501,7 @@ def discover_crypto_whales(
                 continue
             for side in ("from", "to"):
                 wallet = str(transfer.get(side) or "").lower()
-                if wallet.startswith("0x") and len(wallet) == 42:
+                if wallet.startswith("0x") and len(wallet) == 42 and not _is_excluded_crypto_wallet(chain, wallet):
                     wallet_volume[wallet] += value
     for seed_wallet in _seed_wallets_from_text(seed_wallets):
         for transfer in fetch_crypto_wallet_activity(seed_wallet, chain, api_key, token_filter, time_period_days):
@@ -459,12 +510,16 @@ def discover_crypto_whales(
                 continue
             for side in ("from", "to"):
                 wallet = str(transfer.get(side) or "").lower()
-                if wallet.startswith("0x") and len(wallet) == 42:
+                if wallet.startswith("0x") and len(wallet) == 42 and not _is_excluded_crypto_wallet(chain, wallet):
                     wallet_volume[wallet] += value * 0.75
-    return [
-        wallet
-        for wallet, _volume in sorted(wallet_volume.items(), key=lambda item: item[1], reverse=True)[: int(max_wallets)]
-    ]
+    discovered: list[str] = []
+    for wallet, _volume in sorted(wallet_volume.items(), key=lambda item: item[1], reverse=True)[: int(max_wallets) * 3]:
+        if _is_contract_address(chain, api_key, wallet):
+            continue
+        discovered.append(wallet)
+        if len(discovered) >= int(max_wallets):
+            break
+    return discovered
 
 
 def fetch_crypto_wallet_activity(
@@ -680,7 +735,7 @@ def build_crypto_activity_events(wallet: str, transfers: list[dict], chain: str)
 
 
 def _quality_reasons(
-    win_rate: float,
+    profitable_trade_pct: float | None,
     roi_pct: float,
     realized_profit: float,
     avg_trade_size: float,
@@ -691,8 +746,8 @@ def _quality_reasons(
     min_transaction_size: float,
 ) -> list[str]:
     reasons: list[str] = []
-    if completed_trades:
-        reasons.append(f"{win_rate:.0f}% win rate")
+    if completed_trades and profitable_trade_pct is not None:
+        reasons.append(f"{profitable_trade_pct:.0f}% profitable trades")
     if roi_pct >= 20:
         reasons.append("Strong estimated ROI")
     elif roi_pct < -5:
@@ -704,14 +759,14 @@ def _quality_reasons(
     if consistency_score >= 65 and completed_trades >= 2:
         reasons.append("Consistent trade cycles")
     if confidence != "High":
-        reasons.append(f"{confidence} confidence: limited sell history")
-    return reasons[:5] or ["Low confidence: limited sell history"]
+        reasons.append(f"{confidence} confidence: limited swap-cycle history")
+    return reasons[:5] or ["Low confidence: mostly transfers, weak estimate"]
 
 
 def _copy_quality(
     confidence: str,
     completed_trades: int,
-    win_rate: float,
+    profitable_trade_pct: float,
     roi_pct: float,
     consistency_score: float,
     max_drawdown_pct: float,
@@ -719,18 +774,18 @@ def _copy_quality(
 ) -> str:
     if confidence == "Low" or completed_trades == 0:
         return "Unproven"
-    if win_rate < 45 or roi_pct < -5 or max_drawdown_pct >= 45:
+    if profitable_trade_pct < 45 or roi_pct < -5 or max_drawdown_pct >= 45:
         return "Risky"
     if (
         confidence == "High"
         and completed_trades >= 3
-        and win_rate >= 65
+        and profitable_trade_pct >= 65
         and roi_pct >= 20
         and consistency_score >= 60
         and whale_score >= 65
     ):
         return "Elite"
-    if completed_trades >= 2 and win_rate >= 55 and roi_pct >= 0 and consistency_score >= 45:
+    if completed_trades >= 2 and profitable_trade_pct >= 55 and roi_pct >= 0 and consistency_score >= 45:
         return "Strong"
     return "Risky" if roi_pct < 0 else "Unproven"
 
@@ -816,6 +871,7 @@ def _analyze_swap_trade_cycles(
                         "proceeds": matched_proceeds,
                         "return_pct": (profit / matched_cost * 100) if matched_cost else 0.0,
                         "hold_hours": max(0.0, (timestamp_raw - entry_ts) / 3600),
+                        "timestamp_raw": timestamp_raw,
                     }
                 )
                 clear_buy_sell_events += 1
@@ -843,13 +899,20 @@ def _analyze_swap_trade_cycles(
     profitable_swaps = sum(1 for item in completed if float(item.get("profit") or 0) > 0)
     losing_swaps = sum(1 for item in completed if float(item.get("profit") or 0) <= 0)
     completed_trades = len(completed)
-    win_rate = profitable_swaps / completed_trades * 100 if completed_trades else 0.0
+    profitable_trade_pct = profitable_swaps / completed_trades * 100 if completed_trades else None
     trade_returns = [float(item.get("return_pct") or 0) for item in completed]
     avg_return_per_trade = _mean(trade_returns)
+    avg_profit_per_completed_trade = realized_profit / completed_trades if completed_trades else None
     avg_hold_time_hours = _mean([float(item.get("hold_hours") or 0) for item in completed])
-    estimated_profit = realized_profit + unrealized_profit
-    estimated_cost_basis = completed_cost_basis + remaining_cost_basis
-    roi_pct = estimated_profit / estimated_cost_basis * 100 if estimated_cost_basis else 0.0
+    estimated_profit = realized_profit + unrealized_profit if completed_trades else None
+    estimated_cost_basis = completed_cost_basis + (remaining_cost_basis if completed_trades else 0.0)
+    roi_pct = estimated_profit / estimated_cost_basis * 100 if estimated_profit is not None and estimated_cost_basis else None
+    recent_profit_cutoff = int(time.time()) - 7 * 24 * 3600
+    recent_profitable_trades = sum(
+        1
+        for item in completed
+        if float(item.get("profit") or 0) > 0 and int(item.get("timestamp_raw") or 0) >= recent_profit_cutoff
+    )
 
     cumulative_profit = 0.0
     peak_profit = 0.0
@@ -868,26 +931,37 @@ def _analyze_swap_trade_cycles(
         return_stability = 100 - normalize_to_100(dispersion, 75)
     else:
         return_stability = 0.0
+    profitable_pct_score = profitable_trade_pct or 0.0
     consistency_score = _clamp(
-        win_rate * 0.45 + sample_score * 0.25 + drawdown_resilience * 0.20 + return_stability * 0.10
+        profitable_pct_score * 0.45 + sample_score * 0.25 + drawdown_resilience * 0.20 + return_stability * 0.10
     ) if completed_trades else 0.0
 
-    if completed_trades >= 3 and clear_buy_sell_events >= 4:
+    if completed_trades >= 1:
         confidence = "High"
-    elif completed_trades >= 1 or (swap_events and clear_buy_sell_events):
+        confidence_note = "High: clear buy/sell cycle detected"
+    elif swap_events and clear_buy_sell_events:
         confidence = "Medium"
+        confidence_note = "Medium: partial swap history"
     else:
         confidence = "Low"
+        confidence_note = "Low: mostly transfers, weak estimate"
 
     trade_values = [float(event.get("dollar_value") or 0) for event in swap_events]
     transfer_values = [float(row.get("value_usd") or 0) for row in activity if float(row.get("value_usd") or 0) > 0]
     total_volume = sum(trade_values) if trade_values else sum(transfer_values)
     trade_count = len(trade_values) if trade_values else len(transfer_values)
     avg_trade_size = total_volume / trade_count if trade_count else 0.0
+    completed_timestamps = [int(item.get("timestamp_raw") or 0) for item in completed if int(item.get("timestamp_raw") or 0) > 0]
+    if completed_timestamps:
+        active_days = max(1, (max(completed_timestamps) - min(completed_timestamps)) / 86400)
+        trading_frequency = completed_trades / active_days
+    else:
+        trading_frequency = 0.0
+    trading_frequency_score = normalize_to_100(trading_frequency, 1.0)
 
     reasons = _quality_reasons(
-        win_rate,
-        roi_pct,
+        profitable_trade_pct,
+        roi_pct or 0.0,
         realized_profit,
         avg_trade_size,
         trade_count,
@@ -905,12 +979,18 @@ def _analyze_swap_trade_cycles(
         "avg_trade_size": avg_trade_size,
         "largest_trade": max(trade_values or transfer_values or [0.0]),
         "completed_trades": completed_trades,
-        "win_rate": win_rate,
-        "adjusted_win_rate": (profitable_swaps + 5) / (completed_trades + 10) * 100 if completed_trades else 0.0,
+        "profitable_trade_pct": profitable_trade_pct,
+        "profitable_swap_pct": profitable_trade_pct,
+        "win_rate": profitable_trade_pct,
+        "adjusted_win_rate": (profitable_swaps + 5) / (completed_trades + 10) * 100 if completed_trades else None,
         "roi_pct": roi_pct,
         "avg_return_per_trade": avg_return_per_trade,
+        "avg_profit_per_completed_trade": avg_profit_per_completed_trade,
         "profitable_swaps_count": profitable_swaps,
         "losing_swaps_count": losing_swaps,
+        "recent_profitable_trades": recent_profitable_trades,
+        "trading_frequency": trading_frequency,
+        "trading_frequency_score": trading_frequency_score,
         "avg_hold_time_hours": avg_hold_time_hours,
         "realized_profit_estimate": realized_profit,
         "unrealized_profit_estimate": unrealized_profit,
@@ -919,6 +999,7 @@ def _analyze_swap_trade_cycles(
         "max_drawdown_estimate": max_drawdown_pct,
         "consistency_score": consistency_score,
         "confidence": confidence,
+        "confidence_note": confidence_note,
         "copy_reasons": reasons,
         "copy_reason_text": "; ".join(reasons),
         "open_positions": open_positions,
@@ -933,6 +1014,49 @@ def calculate_crypto_wallet_score(
     min_transaction_size: float = 25000,
 ) -> dict:
     wallet = str(wallet).lower()
+    if _is_excluded_crypto_wallet(chain, wallet):
+        return {
+            "wallet": wallet,
+            "chain": chain,
+            "whale_tier": "Dolphin",
+            "whale_score": 0.0,
+            "trend_score": 0.0,
+            "net_profit": None,
+            "estimated_net_flow": 0.0,
+            "roi_pct": None,
+            "estimated_roi_pct": None,
+            "win_rate": None,
+            "profitable_trade_pct": None,
+            "profitable_swap_pct": None,
+            "adjusted_win_rate": None,
+            "total_volume": 0.0,
+            "avg_trade_size": 0.0,
+            "largest_trade": 0.0,
+            "recent_activity": 0,
+            "trade_count": 0,
+            "unique_tokens": 0,
+            "completed_trades": 0,
+            "profitable_swaps_count": 0,
+            "losing_swaps_count": 0,
+            "avg_return_per_trade": None,
+            "avg_profit_per_completed_trade": None,
+            "recent_profitable_trades": 0,
+            "trading_frequency": 0.0,
+            "trading_frequency_score": 0.0,
+            "avg_hold_time_hours": None,
+            "realized_profit_estimate": None,
+            "unrealized_profit_estimate": None,
+            "max_drawdown_estimate": None,
+            "consistency_score": 0.0,
+            "confidence": "Low",
+            "confidence_level": "Low",
+            "confidence_note": "Low: obvious non-trader wallet excluded",
+            "copy_quality": "Unproven",
+            "copy_reasons": ["Excluded non-trader wallet"],
+            "copy_reason_text": "Excluded non-trader wallet",
+            "profit_note": "Excluded from crypto scoring because this is an obvious non-trader address.",
+            "explorer_url": CHAIN_CONFIGS[chain]["explorer"].format(wallet=wallet),
+        }
     quality = _analyze_swap_trade_cycles(wallet, activity, chain, min_transaction_size)
     events = quality["events"]
     total_volume = float(quality["total_volume"])
@@ -959,32 +1083,37 @@ def calculate_crypto_wallet_score(
     incoming = sum(float(row.get("value_usd") or 0) for row in activity if str(row.get("to") or "").lower() == wallet)
     outgoing = sum(float(row.get("value_usd") or 0) for row in activity if str(row.get("from") or "").lower() == wallet)
     estimated_net_flow = incoming - outgoing
-    win_score = quality["win_rate"] if quality["completed_trades"] else 45.0
-    roi_score = normalize_to_100(max(float(quality["roi_pct"]), 0), 100)
-    if not quality["completed_trades"] and quality["swap_events"]:
-        roi_score = 20.0
-    profit_score = normalize_to_100(max(float(quality["realized_profit_estimate"]), 0), max(float(min_transaction_size) * 10, 100_000))
-    volume_score = normalize_to_100(total_volume, 1_000_000)
+    completed_trades = int(quality["completed_trades"])
+    profitable_trade_pct = quality["profitable_trade_pct"]
+    profitable_score = float(profitable_trade_pct or 0)
+    roi_pct = quality["roi_pct"]
+    roi_score = normalize_to_100(max(float(roi_pct or 0), 0), 100) if completed_trades else 0.0
+    realized_profit = float(quality["realized_profit_estimate"] or 0)
+    estimated_profit = quality["estimated_profit"]
+    profit_for_score = max(float(estimated_profit or realized_profit or 0), 0) if completed_trades else 0.0
+    profit_score = normalize_to_100(profit_for_score, max(float(min_transaction_size) * 10, 100_000))
     size_score = normalize_to_100(avg_trade_size, max(float(min_transaction_size) * 2, 1))
+    confidence_score = {"High": 100.0, "Medium": 55.0, "Low": 15.0}.get(str(quality["confidence"]), 15.0)
+    trading_frequency_score = float(quality["trading_frequency_score"] or 0)
     whale_score = (
-        win_score * 0.30
-        + roi_score * 0.25
-        + profit_score * 0.20
-        + volume_score * 0.10
+        profitable_score * 0.30
+        + roi_score * 0.20
+        + trading_frequency_score * 0.20
+        + profit_score * 0.15
         + size_score * 0.10
-        + float(quality["consistency_score"]) * 0.05
+        + confidence_score * 0.05
     )
     if quality["confidence"] == "Low":
-        whale_score *= 0.60
+        whale_score *= 0.45
     elif quality["confidence"] == "Medium":
-        whale_score *= 0.85
+        whale_score *= 0.78
     whale_score -= normalize_to_100(largest_trade / max(total_volume, 1) * 100, 90) * 0.05 if trade_count > 1 else 0
     whale_score = round(max(0, min(100, whale_score)), 2)
     copy_quality = _copy_quality(
         str(quality["confidence"]),
-        int(quality["completed_trades"]),
-        float(quality["win_rate"]),
-        float(quality["roi_pct"]),
+        completed_trades,
+        float(profitable_trade_pct or 0),
+        float(roi_pct or 0),
         float(quality["consistency_score"]),
         float(quality["max_drawdown_estimate"]),
         whale_score,
@@ -999,30 +1128,37 @@ def calculate_crypto_wallet_score(
         "chain": chain,
         "whale_tier": whale_tier(whale_score),
         "whale_score": whale_score,
-        "trend_score": round(min(100, normalize_to_100(recent_activity, 20) * 0.6 + volume_score * 0.4), 2),
-        "net_profit": round(float(quality["estimated_profit"]), 2),
+        "trend_score": round(min(100, trading_frequency_score * 0.65 + normalize_to_100(recent_activity, 20) * 0.35), 2),
+        "net_profit": round(float(quality["estimated_profit"]), 2) if quality["estimated_profit"] is not None else None,
         "estimated_net_flow": round(estimated_net_flow, 2),
-        "roi_pct": round(float(quality["roi_pct"]), 2),
-        "estimated_roi_pct": round(float(quality["roi_pct"]), 2),
-        "win_rate": round(float(quality["win_rate"]), 2),
-        "adjusted_win_rate": round(float(quality["adjusted_win_rate"]), 2),
+        "roi_pct": round(float(roi_pct), 2) if roi_pct is not None else None,
+        "estimated_roi_pct": round(float(roi_pct), 2) if roi_pct is not None else None,
+        "win_rate": round(float(profitable_trade_pct), 2) if profitable_trade_pct is not None else None,
+        "profitable_trade_pct": round(float(profitable_trade_pct), 2) if profitable_trade_pct is not None else None,
+        "profitable_swap_pct": round(float(profitable_trade_pct), 2) if profitable_trade_pct is not None else None,
+        "adjusted_win_rate": round(float(quality["adjusted_win_rate"]), 2) if quality["adjusted_win_rate"] is not None else None,
         "total_volume": round(total_volume, 2),
         "avg_trade_size": round(avg_trade_size, 2),
         "largest_trade": round(largest_trade, 2),
         "recent_activity": int(recent_activity),
         "trade_count": int(trade_count),
         "unique_tokens": int(len(tokens)),
-        "completed_trades": int(quality["completed_trades"]),
+        "completed_trades": completed_trades,
         "profitable_swaps_count": int(quality["profitable_swaps_count"]),
         "losing_swaps_count": int(quality["losing_swaps_count"]),
-        "avg_return_per_trade": round(float(quality["avg_return_per_trade"]), 2),
-        "avg_hold_time_hours": round(float(quality["avg_hold_time_hours"]), 2),
-        "realized_profit_estimate": round(float(quality["realized_profit_estimate"]), 2),
-        "unrealized_profit_estimate": round(float(quality["unrealized_profit_estimate"]), 2),
-        "max_drawdown_estimate": round(float(quality["max_drawdown_estimate"]), 2),
+        "avg_return_per_trade": round(float(quality["avg_return_per_trade"]), 2) if completed_trades else None,
+        "avg_profit_per_completed_trade": round(float(quality["avg_profit_per_completed_trade"]), 2) if quality["avg_profit_per_completed_trade"] is not None else None,
+        "recent_profitable_trades": int(quality["recent_profitable_trades"]),
+        "trading_frequency": round(float(quality["trading_frequency"]), 4),
+        "trading_frequency_score": round(trading_frequency_score, 2),
+        "avg_hold_time_hours": round(float(quality["avg_hold_time_hours"]), 2) if completed_trades else None,
+        "realized_profit_estimate": round(float(quality["realized_profit_estimate"]), 2) if completed_trades else None,
+        "unrealized_profit_estimate": round(float(quality["unrealized_profit_estimate"]), 2) if completed_trades else None,
+        "max_drawdown_estimate": round(float(quality["max_drawdown_estimate"]), 2) if completed_trades else None,
         "consistency_score": round(float(quality["consistency_score"]), 2),
         "confidence": str(quality["confidence"]),
         "confidence_level": str(quality["confidence"]),
+        "confidence_note": str(quality["confidence_note"]),
         "copy_quality": copy_quality,
         "copy_reasons": quality["copy_reasons"],
         "copy_reason_text": quality["copy_reason_text"],

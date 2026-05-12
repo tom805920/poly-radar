@@ -909,6 +909,21 @@ def format_percent(value) -> str:
     return f"{safe_number(value):.2f}%"
 
 
+def format_optional_percent(value, fallback: str = "Insufficient data") -> str:
+    number = optional_metric_number(value)
+    return f"{number:.2f}%" if number is not None else fallback
+
+
+def format_optional_money(value, fallback: str = "Insufficient data") -> str:
+    number = optional_metric_number(value)
+    return format_money(number) if number is not None else fallback
+
+
+def format_optional_score(value, fallback: str = "Calculating...") -> str:
+    number = optional_metric_number(value)
+    return f"{number:.2f}" if number is not None else fallback
+
+
 def format_score(value) -> str:
     return f"{safe_number(value):.2f}"
 
@@ -1255,10 +1270,35 @@ def optional_metric_number(value):
     return number
 
 
+def crypto_completed_cycles(row: dict | pd.Series | None) -> int:
+    if row is None:
+        return 0
+    return int(safe_number(row.get("completed_trades") if hasattr(row, "get") else 0))
+
+
+def crypto_profitable_trade_pct_value(row: dict | pd.Series | None):
+    if crypto_completed_cycles(row) <= 0 or row is None:
+        return None
+    value = row.get("profitable_trade_pct") if row.get("profitable_trade_pct") is not None else row.get("win_rate")
+    return optional_metric_number(value)
+
+
+def crypto_estimated_roi_value(row: dict | pd.Series | None):
+    if crypto_completed_cycles(row) <= 0 or row is None:
+        return None
+    return optional_metric_number(row.get("roi_pct") if row.get("roi_pct") is not None else row.get("roi"))
+
+
+def crypto_estimated_profit_value(row: dict | pd.Series | None):
+    if crypto_completed_cycles(row) <= 0 or row is None:
+        return None
+    return optional_metric_number(row.get("net_profit"))
+
+
 def crypto_watchlist_metric_payload(row: dict | None, last_activity: str | None = None) -> dict:
     if not row:
         return {}
-    roi = optional_metric_number(row.get("roi_pct") if row.get("roi_pct") is not None else row.get("roi"))
+    roi = crypto_estimated_roi_value(row)
     average_trade_size = optional_metric_number(
         row.get("avg_trade_size") if row.get("avg_trade_size") is not None else row.get("average_trade_size")
     )
@@ -1268,17 +1308,23 @@ def crypto_watchlist_metric_payload(row: dict | None, last_activity: str | None 
         "whale_tier": tier,
         "tier": tier,
         "whale_score": optional_metric_number(row.get("whale_score")),
-        "net_profit": optional_metric_number(row.get("net_profit")),
+        "net_profit": crypto_estimated_profit_value(row),
         "roi_pct": roi,
         "roi": roi,
-        "win_rate": optional_metric_number(row.get("win_rate")),
+        "win_rate": crypto_profitable_trade_pct_value(row),
+        "profitable_trade_pct": crypto_profitable_trade_pct_value(row),
+        "profitable_swap_pct": crypto_profitable_trade_pct_value(row),
         "total_volume": optional_metric_number(row.get("total_volume")),
         "avg_trade_size": average_trade_size,
         "average_trade_size": average_trade_size,
         "last_activity": firestore_scalar(last_activity or row.get("last_activity")),
         "chain": firestore_scalar(row.get("chain")),
         "completed_trades": optional_metric_number(row.get("completed_trades")),
+        "avg_profit_per_completed_trade": optional_metric_number(row.get("avg_profit_per_completed_trade")),
+        "recent_profitable_trades": optional_metric_number(row.get("recent_profitable_trades")),
+        "trading_frequency": optional_metric_number(row.get("trading_frequency")),
         "confidence": firestore_scalar(row.get("confidence")),
+        "confidence_note": firestore_scalar(row.get("confidence_note")),
         "copy_quality": firestore_scalar(row.get("copy_quality")),
     }
     return {key: value for key, value in payload.items() if value is not None}
@@ -1287,7 +1333,7 @@ def crypto_watchlist_metric_payload(row: dict | None, last_activity: str | None 
 def crypto_watchlist_has_core_metrics(item: dict) -> bool:
     return all(
         optional_metric_number(item.get(key)) is not None
-        for key in ["whale_score", "net_profit", "roi_pct", "win_rate", "total_volume", "avg_trade_size"]
+        for key in ["whale_score", "total_volume", "avg_trade_size", "completed_trades"]
     )
 
 
@@ -2699,22 +2745,31 @@ def render_crypto_selected_wallet_panel(selected_wallet: str, selected_metadata:
     with metric_cols[0]:
         render_metric_card("Whale Score", f"{safe_number(selected_metadata.get('whale_score')):.2f}", "On-chain rank", "green")
     with metric_cols[1]:
-        render_metric_card("Win Rate", format_percent(selected_metadata.get("win_rate")), "Completed trade cycles", "green")
+        render_metric_card(
+            "Profitable Trade %",
+            format_optional_percent(crypto_profitable_trade_pct_value(selected_metadata)),
+            "Completed cycles only",
+            "green",
+        )
     with metric_cols[2]:
-        render_metric_card("Estimated ROI", format_percent(selected_metadata.get("roi_pct")), "Estimated profit / basis", "green" if safe_number(selected_metadata.get("roi_pct")) >= 0 else "red")
+        selected_roi = crypto_estimated_roi_value(selected_metadata)
+        render_metric_card("Estimated ROI", format_optional_percent(selected_roi), "Decoded swap cycles", "green" if safe_number(selected_roi) >= 0 else "red")
     with metric_cols[3]:
-        render_metric_card("Net Profit", format_money(selected_metadata.get("net_profit")), "Realized + open estimate", "green" if safe_number(selected_metadata.get("net_profit")) >= 0 else "red")
+        selected_profit = crypto_estimated_profit_value(selected_metadata)
+        render_metric_card("Net Profit", format_optional_money(selected_profit), "Decoded cycle estimate", "green" if safe_number(selected_profit) >= 0 else "red")
     with metric_cols[4]:
-        render_metric_card("Completed Trades", f"{int(safe_number(selected_metadata.get('completed_trades'))):,}", "Buy then sell cycles", "blue")
+        render_metric_card("Completed Cycles", f"{int(safe_number(selected_metadata.get('completed_trades'))):,}", "Buy then sell cycles", "blue")
     detail_cols = st.columns(5)
     with detail_cols[0]:
         render_metric_card("Avg Trade Size", format_money(selected_metadata.get("avg_trade_size")), "Mean swap value", "blue")
     with detail_cols[1]:
-        render_metric_card("Avg Return", format_percent(selected_metadata.get("avg_return_per_trade")), "Per completed cycle", "green" if safe_number(selected_metadata.get("avg_return_per_trade")) >= 0 else "red")
+        avg_profit = selected_metadata.get("avg_profit_per_completed_trade") if crypto_completed_cycles(selected_metadata) else None
+        render_metric_card("Avg Profit / Trade", format_optional_money(avg_profit), "Per completed cycle", "green" if safe_number(avg_profit) >= 0 else "red")
     with detail_cols[2]:
-        render_metric_card("Avg Hold", f"{safe_number(selected_metadata.get('avg_hold_time_hours')):.1f}h", "Estimated holding time", "blue")
+        frequency = optional_metric_number(selected_metadata.get("trading_frequency")) if crypto_completed_cycles(selected_metadata) else None
+        render_metric_card("Trading Frequency", f"{frequency:.2f}/day" if frequency is not None else "Insufficient data", "Completed cycles", "blue")
     with detail_cols[3]:
-        render_metric_card("Max Drawdown", format_percent(selected_metadata.get("max_drawdown_estimate")), "Realized cycle estimate", "red" if safe_number(selected_metadata.get("max_drawdown_estimate")) > 20 else "blue")
+        render_metric_card("Recent Profitable", f"{int(safe_number(selected_metadata.get('recent_profitable_trades'))):,}", "Last 7 days", "green")
     with detail_cols[4]:
         render_metric_card("Consistency", f"{safe_number(selected_metadata.get('consistency_score')):.2f}", "Repeatability score", "green")
     st.caption("Copy wallet address")
@@ -3007,7 +3062,7 @@ def render_crypto_watchlist(
     header = st.columns([1.2, 4.4, 1.15, 1.25, 1.25, 1.35, 1.35, 1.75, 1])
     for col, title in zip(
         header,
-        ["Tier", "Wallet address", "Win Rate", "Estimated ROI", "Whale Score", "Net Profit", "Total Volume", "Last Activity", "Remove"],
+        ["Tier", "Wallet address", "Profitable Trade %", "Estimated ROI", "Whale Score", "Net Profit", "Total Volume", "Last Activity", "Remove"],
     ):
         col.markdown(f'<div class="ww-watchlist-head">{title}</div>', unsafe_allow_html=True)
     for item in list(st.session_state["crypto_watchlist_items"]):
@@ -3018,10 +3073,10 @@ def render_crypto_watchlist(
         cols = st.columns([1.2, 4.4, 1.15, 1.25, 1.25, 1.35, 1.35, 1.75, 1])
         cols[0].markdown(tier_html(crypto_wallet_tier(wallet, ranked_lookup)), unsafe_allow_html=True)
         cols[1].markdown(f'<span class="ww-wallet-address compact">{html.escape(wallet)}</span>', unsafe_allow_html=True)
-        cols[2].write(watchlist_metric_text(merged.get("win_rate"), format_percent, fallback))
-        cols[3].write(watchlist_metric_text(merged.get("roi_pct") if merged.get("roi_pct") is not None else merged.get("roi"), format_percent, fallback))
+        cols[2].write(watchlist_metric_text(crypto_profitable_trade_pct_value(merged), format_percent, "Insufficient data"))
+        cols[3].write(watchlist_metric_text(crypto_estimated_roi_value(merged), format_percent, "Insufficient data"))
         cols[4].write(watchlist_metric_text(merged.get("whale_score"), lambda value: f"{value:.2f}", fallback))
-        cols[5].write(watchlist_metric_text(merged.get("net_profit"), format_money, fallback))
+        cols[5].write(watchlist_metric_text(crypto_estimated_profit_value(merged), format_money, "Insufficient data"))
         cols[6].write(watchlist_metric_text(merged.get("total_volume"), format_money, fallback))
         cols[7].write(last_activity or fallback)
         if cols[8].button("Remove", key=f"remove-crypto-{wallet}"):
@@ -3052,12 +3107,18 @@ def render_crypto_dashboard(
             "Use Discover Crypto Whales in the sidebar. Add explorer API keys or seed wallets for richer discovery.",
         )
         return
-    filtered = [
-        row for row in rows
-        if safe_number(row.get("total_volume")) >= float(min_volume)
-        and safe_number(row.get("whale_score")) >= float(min_whale_score)
-        and safe_number(row.get("win_rate")) >= float(min_win_rate)
-    ]
+    filtered = []
+    for row in rows:
+        profitable_pct = crypto_profitable_trade_pct_value(row)
+        passes_profitable_filter = float(min_win_rate) <= 0 or (
+            profitable_pct is not None and profitable_pct >= float(min_win_rate)
+        )
+        if (
+            safe_number(row.get("total_volume")) >= float(min_volume)
+            and safe_number(row.get("whale_score")) >= float(min_whale_score)
+            and passes_profitable_filter
+        ):
+            filtered.append(row)
     if not filtered:
         filtered = sorted(rows, key=lambda row: row.get("whale_score", 0), reverse=True)[: max(1, min(25, len(rows)))]
         st.info("Showing best available crypto wallets because no wallet passed every selected threshold.")
@@ -3066,18 +3127,26 @@ def render_crypto_dashboard(
         "whale_tier",
         "wallet",
         "whale_score",
-        "win_rate",
+        "profitable_trade_pct",
         "roi_pct",
         "net_profit",
         "total_volume",
         "avg_trade_size",
         "completed_trades",
+        "avg_profit_per_completed_trade",
+        "recent_profitable_trades",
+        "trading_frequency",
         "confidence",
         "copy_quality",
     ]
     for column in columns:
         if column not in df.columns:
-            df[column] = "" if column in {"whale_tier", "wallet", "confidence", "copy_quality"} else 0
+            if column in {"whale_tier", "wallet", "confidence", "copy_quality"}:
+                df[column] = ""
+            elif column in {"profitable_trade_pct", "roi_pct", "net_profit", "avg_profit_per_completed_trade", "trading_frequency"}:
+                df[column] = None
+            else:
+                df[column] = 0
     metric_cols = st.columns(4)
     with metric_cols[0]:
         render_metric_card("Wallets Found", f"{len(rows):,}", "Public candidates", "blue")
@@ -3087,9 +3156,19 @@ def render_crypto_dashboard(
         render_metric_card("Best Copy Score", f"{safe_number(df['whale_score'].max()):.2f}", "Quality-weighted rank", "green")
     with metric_cols[3]:
         best_roi = pd.to_numeric(df["roi_pct"], errors="coerce").max()
-        render_metric_card("Top Estimated ROI", format_percent(best_roi), "Completed cycles", "green" if safe_number(best_roi) >= 0 else "red")
+        render_metric_card("Top Estimated ROI", format_optional_percent(best_roi), "Completed cycles only", "green" if safe_number(best_roi) >= 0 else "red")
+    display_df = df[columns].copy()
+    completed_mask = pd.to_numeric(df["completed_trades"], errors="coerce").fillna(0) > 0
+    display_df.loc[~completed_mask, ["profitable_trade_pct", "roi_pct", "net_profit", "avg_profit_per_completed_trade", "trading_frequency"]] = None
+    display_df["profitable_trade_pct"] = display_df["profitable_trade_pct"].apply(format_optional_percent)
+    display_df["roi_pct"] = display_df["roi_pct"].apply(format_optional_percent)
+    display_df["net_profit"] = display_df["net_profit"].apply(format_optional_money)
+    display_df["avg_profit_per_completed_trade"] = display_df["avg_profit_per_completed_trade"].apply(format_optional_money)
+    display_df["trading_frequency"] = display_df["trading_frequency"].apply(
+        lambda value: f"{safe_number(value):.2f}/day" if optional_metric_number(value) is not None else "Insufficient data"
+    )
     ranking_event = st.dataframe(
-        style_financial_table(df[columns]),
+        style_financial_table(display_df),
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
@@ -3099,12 +3178,15 @@ def render_crypto_dashboard(
             "whale_tier": st.column_config.TextColumn("Tier", width=130),
             "wallet": st.column_config.TextColumn("Wallet Address", width=420, pinned=True),
             "whale_score": st.column_config.NumberColumn("Whale Score", format="%.2f", alignment="right"),
-            "win_rate": st.column_config.NumberColumn("Win Rate", format="%.2f%%", alignment="right"),
-            "roi_pct": st.column_config.NumberColumn("Estimated ROI", format="%.2f%%", alignment="right"),
-            "net_profit": st.column_config.NumberColumn("Net Profit", format="$%.2f", alignment="right"),
+            "profitable_trade_pct": st.column_config.TextColumn("Profitable Trade %", width=170),
+            "roi_pct": st.column_config.TextColumn("Estimated ROI", width=140),
+            "net_profit": st.column_config.TextColumn("Net Profit", width=140),
             "total_volume": st.column_config.NumberColumn("Total Volume", format="$%.2f", alignment="right"),
             "avg_trade_size": st.column_config.NumberColumn("Average Trade Size", format="$%.2f", alignment="right"),
-            "completed_trades": st.column_config.NumberColumn("Completed Trades", format="%d", alignment="right"),
+            "completed_trades": st.column_config.NumberColumn("Completed Trade Cycles", format="%d", alignment="right"),
+            "avg_profit_per_completed_trade": st.column_config.TextColumn("Avg Profit / Trade", width=160),
+            "recent_profitable_trades": st.column_config.NumberColumn("Recent Profitable Trades", format="%d", alignment="right"),
+            "trading_frequency": st.column_config.TextColumn("Trading Frequency", width=150),
             "confidence": st.column_config.TextColumn("Confidence", width=130),
             "copy_quality": st.column_config.TextColumn("Copy Quality", width=140),
         },
@@ -3248,11 +3330,13 @@ with st.sidebar:
         crypto_token_filter = st.selectbox("Token filter", token_options)
         crypto_time_period_days = st.selectbox("Time period", [7, 30, 90], index=1, format_func=lambda d: f"Last {d} days")
         crypto_max_wallets = st.number_input("Candidate wallets to analyze", min_value=5, max_value=200, value=50, step=5)
-        include_cex_related = st.checkbox(
-            "Include public CEX-related wallets",
-            value=False,
-            help="Uses only public labelled addresses where available. This does not track private exchange user accounts.",
+        st.checkbox(
+            "Exclude exchange/contract wallets",
+            value=True,
+            disabled=True,
+            help="Obvious non-trader addresses such as zero/burn addresses, labelled exchange hot wallets, DEX routers, and known token contracts are not ranked.",
         )
+        include_cex_related = False
         crypto_seed_wallet_text = st.text_area(
             "Optional seed wallets",
             height=100,
@@ -3265,12 +3349,12 @@ with st.sidebar:
         crypto_min_transaction_size = st.number_input("Minimum transaction size", min_value=0.0, value=25000.0, step=5000.0)
         crypto_min_whale_score = st.slider("Minimum whale score", 0, 100, 20, 5)
         crypto_min_win_rate = st.number_input(
-            "Minimum win rate if calculable",
+            "Minimum profitable trade %",
             min_value=0.0,
             max_value=100.0,
             value=0.0,
             step=1.0,
-            help="Uses completed public swap cycles when a wallet has visible buys followed by sells.",
+            help="Calculated only from completed public buy/sell swap cycles. Wallets without completed cycles show insufficient data.",
         )
     else:
         page = st.radio("Polymarket", ["Dashboard", "Wallet Details", "Watchlist"])

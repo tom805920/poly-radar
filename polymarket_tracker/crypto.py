@@ -90,6 +90,10 @@ PUBLIC_CEX_RELATED_WALLETS = {
 QUOTE_TOKENS = {"ETH", "WETH", "BNB", "WBNB", "USDT", "USDC", "USDBC", "DAI"}
 
 
+def _clamp(value: float, floor: float = 0.0, ceiling: float = 100.0) -> float:
+    return max(floor, min(ceiling, float(value)))
+
+
 DEX_ROUTER_CONTRACTS = {
     "Ethereum": {
         "0x7a250d5630b4cf539739df2c5dacb4c659f2488d": "Uniswap V2",
@@ -574,6 +578,14 @@ def _action_for_swap(sold_symbol: str, bought_symbol: str, confirmed: bool) -> t
     return "SWAP", f"{prefix}Swapped {sold_symbol} -> {bought_symbol}"
 
 
+def _is_quote_token(symbol: str) -> bool:
+    return str(symbol or "").upper() in QUOTE_TOKENS
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
 def build_crypto_activity_events(wallet: str, transfers: list[dict], chain: str) -> list[dict]:
     wallet = str(wallet).lower()
     groups: dict[str, list[dict]] = defaultdict(list)
@@ -667,6 +679,253 @@ def build_crypto_activity_events(wallet: str, transfers: list[dict], chain: str)
     )
 
 
+def _quality_reasons(
+    win_rate: float,
+    roi_pct: float,
+    realized_profit: float,
+    avg_trade_size: float,
+    trade_count: int,
+    consistency_score: float,
+    confidence: str,
+    completed_trades: int,
+    min_transaction_size: float,
+) -> list[str]:
+    reasons: list[str] = []
+    if completed_trades:
+        reasons.append(f"{win_rate:.0f}% win rate")
+    if roi_pct >= 20:
+        reasons.append("Strong estimated ROI")
+    elif roi_pct < -5:
+        reasons.append("Negative estimated ROI")
+    if realized_profit > 0:
+        reasons.append(f"${realized_profit:,.0f} realized profit estimate")
+    if avg_trade_size >= max(float(min_transaction_size), 1) and trade_count >= 3:
+        reasons.append("Large repeat trades")
+    if consistency_score >= 65 and completed_trades >= 2:
+        reasons.append("Consistent trade cycles")
+    if confidence != "High":
+        reasons.append(f"{confidence} confidence: limited sell history")
+    return reasons[:5] or ["Low confidence: limited sell history"]
+
+
+def _copy_quality(
+    confidence: str,
+    completed_trades: int,
+    win_rate: float,
+    roi_pct: float,
+    consistency_score: float,
+    max_drawdown_pct: float,
+    whale_score: float,
+) -> str:
+    if confidence == "Low" or completed_trades == 0:
+        return "Unproven"
+    if win_rate < 45 or roi_pct < -5 or max_drawdown_pct >= 45:
+        return "Risky"
+    if (
+        confidence == "High"
+        and completed_trades >= 3
+        and win_rate >= 65
+        and roi_pct >= 20
+        and consistency_score >= 60
+        and whale_score >= 65
+    ):
+        return "Elite"
+    if completed_trades >= 2 and win_rate >= 55 and roi_pct >= 0 and consistency_score >= 45:
+        return "Strong"
+    return "Risky" if roi_pct < 0 else "Unproven"
+
+
+def _analyze_swap_trade_cycles(
+    wallet: str,
+    activity: list[dict],
+    chain: str,
+    min_transaction_size: float,
+) -> dict:
+    events = build_crypto_activity_events(wallet, activity, chain)
+    swap_events = [
+        event
+        for event in events
+        if event.get("category") == "Trades / Swaps" and float(event.get("dollar_value") or 0) > 0
+    ]
+    lots: dict[str, list[dict]] = defaultdict(list)
+    last_prices: dict[str, float] = {}
+    completed: list[dict] = []
+    realized_profit = 0.0
+    completed_cost_basis = 0.0
+    open_cost_basis = 0.0
+    clear_buy_sell_events = 0
+    partial_events = 0
+
+    for event in sorted(swap_events, key=lambda row: int(row.get("timestamp_raw") or 0)):
+        action = str(event.get("action") or "").upper()
+        timestamp_raw = int(event.get("timestamp_raw") or 0)
+        dollar_value = float(event.get("dollar_value") or 0)
+        sold_token = str(event.get("token_sold") or "").upper()
+        bought_token = str(event.get("token_bought") or "").upper()
+        amount_sold = float(event.get("amount_sold") or 0)
+        amount_bought = float(event.get("amount_bought") or 0)
+
+        is_clear_buy = action == "BUY" and bought_token and not _is_quote_token(bought_token)
+        is_clear_sell = action == "SELL" and sold_token and not _is_quote_token(sold_token)
+
+        if is_clear_buy and amount_bought > 0 and dollar_value > 0:
+            lots[bought_token].append(
+                {
+                    "amount": amount_bought,
+                    "cost": dollar_value,
+                    "entry_ts": timestamp_raw,
+                }
+            )
+            last_prices[bought_token] = dollar_value / amount_bought
+            open_cost_basis += dollar_value
+            clear_buy_sell_events += 1
+            continue
+
+        if is_clear_sell and amount_sold > 0 and dollar_value > 0:
+            last_prices[sold_token] = dollar_value / amount_sold
+            remaining_to_match = amount_sold
+            matched_amount = 0.0
+            matched_cost = 0.0
+            weighted_entry = 0.0
+            for lot in lots.get(sold_token, []):
+                lot_amount = float(lot.get("amount") or 0)
+                lot_cost = float(lot.get("cost") or 0)
+                if lot_amount <= 0 or lot_cost <= 0 or remaining_to_match <= 0:
+                    continue
+                take_amount = min(lot_amount, remaining_to_match)
+                unit_cost = lot_cost / lot_amount
+                take_cost = take_amount * unit_cost
+                lot["amount"] = lot_amount - take_amount
+                lot["cost"] = lot_cost - take_cost
+                remaining_to_match -= take_amount
+                matched_amount += take_amount
+                matched_cost += take_cost
+                weighted_entry += float(lot.get("entry_ts") or timestamp_raw) * take_cost
+            if matched_cost > 0 and matched_amount > 0:
+                matched_proceeds = dollar_value * (matched_amount / amount_sold)
+                profit = matched_proceeds - matched_cost
+                realized_profit += profit
+                completed_cost_basis += matched_cost
+                open_cost_basis = max(0.0, open_cost_basis - matched_cost)
+                entry_ts = weighted_entry / matched_cost if matched_cost else timestamp_raw
+                completed.append(
+                    {
+                        "token": sold_token,
+                        "profit": profit,
+                        "cost_basis": matched_cost,
+                        "proceeds": matched_proceeds,
+                        "return_pct": (profit / matched_cost * 100) if matched_cost else 0.0,
+                        "hold_hours": max(0.0, (timestamp_raw - entry_ts) / 3600),
+                    }
+                )
+                clear_buy_sell_events += 1
+            else:
+                partial_events += 1
+            continue
+
+        partial_events += 1
+
+    unrealized_profit = 0.0
+    remaining_cost_basis = 0.0
+    open_positions = 0
+    for token, token_lots in lots.items():
+        price = last_prices.get(token)
+        for lot in token_lots:
+            amount = float(lot.get("amount") or 0)
+            cost = float(lot.get("cost") or 0)
+            if amount <= 0 or cost <= 0:
+                continue
+            open_positions += 1
+            remaining_cost_basis += cost
+            if price is not None and price > 0:
+                unrealized_profit += amount * price - cost
+
+    profitable_swaps = sum(1 for item in completed if float(item.get("profit") or 0) > 0)
+    losing_swaps = sum(1 for item in completed if float(item.get("profit") or 0) <= 0)
+    completed_trades = len(completed)
+    win_rate = profitable_swaps / completed_trades * 100 if completed_trades else 0.0
+    trade_returns = [float(item.get("return_pct") or 0) for item in completed]
+    avg_return_per_trade = _mean(trade_returns)
+    avg_hold_time_hours = _mean([float(item.get("hold_hours") or 0) for item in completed])
+    estimated_profit = realized_profit + unrealized_profit
+    estimated_cost_basis = completed_cost_basis + remaining_cost_basis
+    roi_pct = estimated_profit / estimated_cost_basis * 100 if estimated_cost_basis else 0.0
+
+    cumulative_profit = 0.0
+    peak_profit = 0.0
+    max_drawdown = 0.0
+    for item in completed:
+        cumulative_profit += float(item.get("profit") or 0)
+        peak_profit = max(peak_profit, cumulative_profit)
+        max_drawdown = max(max_drawdown, peak_profit - cumulative_profit)
+    max_drawdown_pct = max_drawdown / max(completed_cost_basis, 1) * 100 if completed else 0.0
+
+    sample_score = normalize_to_100(completed_trades, 12)
+    drawdown_resilience = 100 - normalize_to_100(max_drawdown_pct, 50)
+    if trade_returns:
+        mean_return = _mean(trade_returns)
+        dispersion = _mean([abs(value - mean_return) for value in trade_returns])
+        return_stability = 100 - normalize_to_100(dispersion, 75)
+    else:
+        return_stability = 0.0
+    consistency_score = _clamp(
+        win_rate * 0.45 + sample_score * 0.25 + drawdown_resilience * 0.20 + return_stability * 0.10
+    ) if completed_trades else 0.0
+
+    if completed_trades >= 3 and clear_buy_sell_events >= 4:
+        confidence = "High"
+    elif completed_trades >= 1 or (swap_events and clear_buy_sell_events):
+        confidence = "Medium"
+    else:
+        confidence = "Low"
+
+    trade_values = [float(event.get("dollar_value") or 0) for event in swap_events]
+    transfer_values = [float(row.get("value_usd") or 0) for row in activity if float(row.get("value_usd") or 0) > 0]
+    total_volume = sum(trade_values) if trade_values else sum(transfer_values)
+    trade_count = len(trade_values) if trade_values else len(transfer_values)
+    avg_trade_size = total_volume / trade_count if trade_count else 0.0
+
+    reasons = _quality_reasons(
+        win_rate,
+        roi_pct,
+        realized_profit,
+        avg_trade_size,
+        trade_count,
+        consistency_score,
+        confidence,
+        completed_trades,
+        min_transaction_size,
+    )
+
+    return {
+        "events": events,
+        "swap_events": swap_events,
+        "total_volume": total_volume,
+        "trade_count": trade_count,
+        "avg_trade_size": avg_trade_size,
+        "largest_trade": max(trade_values or transfer_values or [0.0]),
+        "completed_trades": completed_trades,
+        "win_rate": win_rate,
+        "adjusted_win_rate": (profitable_swaps + 5) / (completed_trades + 10) * 100 if completed_trades else 0.0,
+        "roi_pct": roi_pct,
+        "avg_return_per_trade": avg_return_per_trade,
+        "profitable_swaps_count": profitable_swaps,
+        "losing_swaps_count": losing_swaps,
+        "avg_hold_time_hours": avg_hold_time_hours,
+        "realized_profit_estimate": realized_profit,
+        "unrealized_profit_estimate": unrealized_profit,
+        "estimated_profit": estimated_profit,
+        "estimated_cost_basis": estimated_cost_basis,
+        "max_drawdown_estimate": max_drawdown_pct,
+        "consistency_score": consistency_score,
+        "confidence": confidence,
+        "copy_reasons": reasons,
+        "copy_reason_text": "; ".join(reasons),
+        "open_positions": open_positions,
+        "partial_trade_events": partial_events,
+    }
+
+
 def calculate_crypto_wallet_score(
     wallet: str,
     activity: list[dict],
@@ -674,51 +933,99 @@ def calculate_crypto_wallet_score(
     min_transaction_size: float = 25000,
 ) -> dict:
     wallet = str(wallet).lower()
-    values = [float(row.get("value_usd") or 0) for row in activity if float(row.get("value_usd") or 0) > 0]
-    total_volume = sum(values)
-    trade_count = len(values)
-    avg_trade_size = total_volume / trade_count if trade_count else 0.0
-    largest_trade = max(values) if values else 0.0
-    recent_activity = sum(1 for row in activity if int(row.get("timestamp_raw") or 0) >= int(time.time()) - 7 * 24 * 3600)
-    tokens = {str(row.get("token") or "") for row in activity if row.get("token")}
+    quality = _analyze_swap_trade_cycles(wallet, activity, chain, min_transaction_size)
+    events = quality["events"]
+    total_volume = float(quality["total_volume"])
+    trade_count = int(quality["trade_count"])
+    avg_trade_size = float(quality["avg_trade_size"])
+    largest_trade = float(quality["largest_trade"])
+    recent_activity = sum(
+        1 for row in events
+        if int(row.get("timestamp_raw") or 0) >= int(time.time()) - 7 * 24 * 3600
+    )
+    if not events:
+        recent_activity = sum(
+            1 for row in activity
+            if int(row.get("timestamp_raw") or 0) >= int(time.time()) - 7 * 24 * 3600
+        )
+    tokens = {
+        str(value or "").upper()
+        for row in events
+        for value in [row.get("token_sold"), row.get("token_bought")]
+        if value
+    }
+    if not tokens:
+        tokens = {str(row.get("token") or "").upper() for row in activity if row.get("token")}
     incoming = sum(float(row.get("value_usd") or 0) for row in activity if str(row.get("to") or "").lower() == wallet)
     outgoing = sum(float(row.get("value_usd") or 0) for row in activity if str(row.get("from") or "").lower() == wallet)
     estimated_net_flow = incoming - outgoing
-    directional_balance = 100 - min(100, abs(incoming - outgoing) / max(total_volume, 1) * 100)
-    size_reliability = normalize_to_100(avg_trade_size, max(float(min_transaction_size) * 2, 1))
+    win_score = quality["win_rate"] if quality["completed_trades"] else 45.0
+    roi_score = normalize_to_100(max(float(quality["roi_pct"]), 0), 100)
+    if not quality["completed_trades"] and quality["swap_events"]:
+        roi_score = 20.0
+    profit_score = normalize_to_100(max(float(quality["realized_profit_estimate"]), 0), max(float(min_transaction_size) * 10, 100_000))
     volume_score = normalize_to_100(total_volume, 1_000_000)
-    activity_score = normalize_to_100(recent_activity, 20)
-    frequency_score = normalize_to_100(trade_count, 80)
-    diversity_score = normalize_to_100(len(tokens), 4)
-    concentration_penalty = normalize_to_100(largest_trade / max(total_volume, 1) * 100, 85) * 0.18 if trade_count > 1 else 12
+    size_score = normalize_to_100(avg_trade_size, max(float(min_transaction_size) * 2, 1))
     whale_score = (
-        volume_score * 0.35
-        + size_reliability * 0.25
-        + activity_score * 0.15
-        + directional_balance * 0.10
-        + diversity_score * 0.10
-        + frequency_score * 0.05
-        - concentration_penalty
+        win_score * 0.30
+        + roi_score * 0.25
+        + profit_score * 0.20
+        + volume_score * 0.10
+        + size_score * 0.10
+        + float(quality["consistency_score"]) * 0.05
     )
+    if quality["confidence"] == "Low":
+        whale_score *= 0.60
+    elif quality["confidence"] == "Medium":
+        whale_score *= 0.85
+    whale_score -= normalize_to_100(largest_trade / max(total_volume, 1) * 100, 90) * 0.05 if trade_count > 1 else 0
     whale_score = round(max(0, min(100, whale_score)), 2)
+    copy_quality = _copy_quality(
+        str(quality["confidence"]),
+        int(quality["completed_trades"]),
+        float(quality["win_rate"]),
+        float(quality["roi_pct"]),
+        float(quality["consistency_score"]),
+        float(quality["max_drawdown_estimate"]),
+        whale_score,
+    )
+    profit_note = (
+        "Estimated from public DEX swap cycles; confidence improves when both buys and later sells are visible."
+        if quality["completed_trades"]
+        else "No completed buy/sell cycle detected yet; this wallet is scored as unproven until sell history appears."
+    )
     return {
         "wallet": wallet,
         "chain": chain,
         "whale_tier": whale_tier(whale_score),
         "whale_score": whale_score,
-        "trend_score": round(min(100, activity_score * 0.6 + volume_score * 0.4), 2),
-        "net_profit": round(estimated_net_flow, 2),
+        "trend_score": round(min(100, normalize_to_100(recent_activity, 20) * 0.6 + volume_score * 0.4), 2),
+        "net_profit": round(float(quality["estimated_profit"]), 2),
         "estimated_net_flow": round(estimated_net_flow, 2),
-        "roi_pct": 0.0,
-        "win_rate": 0.0,
-        "adjusted_win_rate": 0.0,
+        "roi_pct": round(float(quality["roi_pct"]), 2),
+        "estimated_roi_pct": round(float(quality["roi_pct"]), 2),
+        "win_rate": round(float(quality["win_rate"]), 2),
+        "adjusted_win_rate": round(float(quality["adjusted_win_rate"]), 2),
         "total_volume": round(total_volume, 2),
         "avg_trade_size": round(avg_trade_size, 2),
         "largest_trade": round(largest_trade, 2),
         "recent_activity": int(recent_activity),
         "trade_count": int(trade_count),
         "unique_tokens": int(len(tokens)),
-        "consistency_score": round(directional_balance, 2),
-        "profit_note": "Realized P/L is not reliably calculable from public transfer data alone; net profit shows estimated net on-chain flow.",
+        "completed_trades": int(quality["completed_trades"]),
+        "profitable_swaps_count": int(quality["profitable_swaps_count"]),
+        "losing_swaps_count": int(quality["losing_swaps_count"]),
+        "avg_return_per_trade": round(float(quality["avg_return_per_trade"]), 2),
+        "avg_hold_time_hours": round(float(quality["avg_hold_time_hours"]), 2),
+        "realized_profit_estimate": round(float(quality["realized_profit_estimate"]), 2),
+        "unrealized_profit_estimate": round(float(quality["unrealized_profit_estimate"]), 2),
+        "max_drawdown_estimate": round(float(quality["max_drawdown_estimate"]), 2),
+        "consistency_score": round(float(quality["consistency_score"]), 2),
+        "confidence": str(quality["confidence"]),
+        "confidence_level": str(quality["confidence"]),
+        "copy_quality": copy_quality,
+        "copy_reasons": quality["copy_reasons"],
+        "copy_reason_text": quality["copy_reason_text"],
+        "profit_note": profit_note,
         "explorer_url": CHAIN_CONFIGS[chain]["explorer"].format(wallet=wallet),
     }

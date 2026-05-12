@@ -690,6 +690,10 @@ def style_financial_table(table_df: pd.DataFrame):
             "dollar_value",
             "avg_trade_size",
             "largest_trade",
+            "avg_return_per_trade",
+            "realized_profit_estimate",
+            "unrealized_profit_estimate",
+            "consistency_score",
         ]
         if col in table_df.columns
     ]
@@ -1215,6 +1219,11 @@ def add_crypto_wallet_to_watchlist(wallet: str, row: dict | None = None) -> None
                 "roi_pct": row.get("roi_pct"),
                 "whale_tier": normalize_tier_name(row.get("whale_tier")),
                 "chain": row.get("chain"),
+                "total_volume": row.get("total_volume"),
+                "avg_trade_size": row.get("avg_trade_size"),
+                "completed_trades": row.get("completed_trades"),
+                "confidence": row.get("confidence"),
+                "copy_quality": row.get("copy_quality"),
             }
         )
     existing[wallet] = item
@@ -2538,6 +2547,14 @@ def render_crypto_selected_wallet_panel(selected_wallet: str, selected_metadata:
     if not selected_metadata:
         return
     lookup = {selected_wallet.lower(): selected_metadata}
+    confidence = str(selected_metadata.get("confidence") or "Low")
+    copy_quality = str(selected_metadata.get("copy_quality") or "Unproven")
+    quality_tone = {"Elite": "green", "Strong": "green", "Risky": "red", "Unproven": "blue"}.get(copy_quality, "blue")
+    confidence_tone = {"High": "green", "Medium": "blue", "Low": "red"}.get(confidence, "blue")
+    reasons = selected_metadata.get("copy_reasons") or []
+    if isinstance(reasons, str):
+        reasons = [text.strip() for text in reasons.split(";") if text.strip()]
+    reason_html = "".join(badge(html.escape(str(reason)), "blue") for reason in reasons[:4])
     st.markdown(
         f"""
         <div class="ww-wallet-panel">
@@ -2546,10 +2563,15 @@ def render_crypto_selected_wallet_panel(selected_wallet: str, selected_metadata:
               <div class="ww-eyebrow">Selected Crypto Wallet</div>
               <div style="margin: 0.35rem 0;">{crypto_wallet_badge_html(selected_wallet, lookup)}</div>
             </div>
-            <div class="ww-pill-row">{badge(str(selected_metadata.get("chain") or "On-chain"), "blue")}{badge("Read-only", "green")}</div>
+            <div class="ww-pill-row">
+              {badge(str(selected_metadata.get("chain") or "On-chain"), "blue")}
+              {badge(copy_quality, quality_tone)}
+              {badge(confidence + " confidence", confidence_tone)}
+            </div>
           </div>
           <div class="ww-terminal-line"></div>
           <div class="ww-section-copy">{html.escape(str(selected_metadata.get("profit_note") or "Crypto scoring uses public on-chain wallet activity only."))}</div>
+          <div class="ww-pill-row" style="margin-top: 0.8rem;">{reason_html}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -2558,13 +2580,24 @@ def render_crypto_selected_wallet_panel(selected_wallet: str, selected_metadata:
     with metric_cols[0]:
         render_metric_card("Whale Score", f"{safe_number(selected_metadata.get('whale_score')):.2f}", "On-chain rank", "green")
     with metric_cols[1]:
-        render_metric_card("Total Volume", format_money(selected_metadata.get("total_volume")), "Observed stable transfers", "blue")
+        render_metric_card("Win Rate", format_percent(selected_metadata.get("win_rate")), "Completed trade cycles", "green")
     with metric_cols[2]:
-        render_metric_card("Average Position", format_money(selected_metadata.get("avg_trade_size")), "Mean transfer size", "blue")
+        render_metric_card("Estimated ROI", format_percent(selected_metadata.get("roi_pct")), "Estimated profit / basis", "green" if safe_number(selected_metadata.get("roi_pct")) >= 0 else "red")
     with metric_cols[3]:
-        render_metric_card("Recent Activity", f"{int(safe_number(selected_metadata.get('recent_activity'))):,}", "Last 7 days", "green")
+        render_metric_card("Net Profit", format_money(selected_metadata.get("net_profit")), "Realized + open estimate", "green" if safe_number(selected_metadata.get("net_profit")) >= 0 else "red")
     with metric_cols[4]:
-        render_metric_card("Estimated P/L", "N/A", "Not public from transfers", "blue")
+        render_metric_card("Completed Trades", f"{int(safe_number(selected_metadata.get('completed_trades'))):,}", "Buy then sell cycles", "blue")
+    detail_cols = st.columns(5)
+    with detail_cols[0]:
+        render_metric_card("Avg Trade Size", format_money(selected_metadata.get("avg_trade_size")), "Mean swap value", "blue")
+    with detail_cols[1]:
+        render_metric_card("Avg Return", format_percent(selected_metadata.get("avg_return_per_trade")), "Per completed cycle", "green" if safe_number(selected_metadata.get("avg_return_per_trade")) >= 0 else "red")
+    with detail_cols[2]:
+        render_metric_card("Avg Hold", f"{safe_number(selected_metadata.get('avg_hold_time_hours')):.1f}h", "Estimated holding time", "blue")
+    with detail_cols[3]:
+        render_metric_card("Max Drawdown", format_percent(selected_metadata.get("max_drawdown_estimate")), "Realized cycle estimate", "red" if safe_number(selected_metadata.get("max_drawdown_estimate")) > 20 else "blue")
+    with detail_cols[4]:
+        render_metric_card("Consistency", f"{safe_number(selected_metadata.get('consistency_score')):.2f}", "Repeatability score", "green")
     st.caption("Copy wallet address")
     st.code(selected_wallet, language="text")
     action_cols = st.columns([1, 1, 3])
@@ -2575,7 +2608,7 @@ def render_crypto_selected_wallet_panel(selected_wallet: str, selected_metadata:
     ):
         add_crypto_wallet_to_watchlist(selected_wallet, selected_metadata)
         st.rerun()
-    if action_cols[1].button("View Recent Transfers", key="selected-crypto-wallet-recent-transfers"):
+    if action_cols[1].button("View Recent Swaps", key="selected-crypto-wallet-recent-transfers"):
         st.session_state["selected_crypto_wallet"] = selected_wallet
         st.session_state["show_selected_crypto_trades"] = selected_wallet
         st.rerun()
@@ -2779,7 +2812,7 @@ def render_crypto_watchlist(
     render_crypto_new_alerts(ranked_lookup)
     render_compact_title("Saved Crypto Wallets")
     header = st.columns([1.25, 5, 1.25, 1.35, 1.05, 2, 1])
-    for col, title in zip(header, ["Tier", "Wallet address", "Whale score", "Volume", "ROI", "Last transfer", "Remove"]):
+    for col, title in zip(header, ["Tier", "Wallet address", "Whale score", "Net profit", "ROI", "Last activity", "Remove"]):
         col.markdown(f'<div class="ww-watchlist-head">{title}</div>', unsafe_allow_html=True)
     last_times = last_trade_times_from_df(activity_df.rename(columns={"dollar_value": "value"})) if not activity_df.empty else {}
     for item in list(st.session_state["crypto_watchlist_items"]):
@@ -2789,8 +2822,8 @@ def render_crypto_watchlist(
         cols[0].markdown(tier_html(crypto_wallet_tier(wallet, ranked_lookup)), unsafe_allow_html=True)
         cols[1].markdown(f'<span class="ww-wallet-address compact">{html.escape(wallet)}</span>', unsafe_allow_html=True)
         cols[2].write("" if merged.get("whale_score") is None else f"{safe_number(merged.get('whale_score')):.2f}")
-        cols[3].write("" if merged.get("total_volume") is None else format_money(merged.get("total_volume")))
-        cols[4].write("N/A")
+        cols[3].write("" if merged.get("net_profit") is None else format_money(merged.get("net_profit")))
+        cols[4].write("" if merged.get("roi_pct") is None else format_percent(merged.get("roi_pct")))
         cols[5].write(last_times.get(wallet, "N/A"))
         if cols[6].button("Remove", key=f"remove-crypto-{wallet}"):
             remove_crypto_wallet_from_watchlist(wallet)
@@ -2833,28 +2866,29 @@ def render_crypto_dashboard(
     columns = [
         "whale_tier",
         "wallet",
-        "chain",
         "whale_score",
-        "trend_score",
+        "win_rate",
+        "roi_pct",
+        "net_profit",
         "total_volume",
         "avg_trade_size",
-        "largest_trade",
-        "recent_activity",
-        "trade_count",
-        "unique_tokens",
+        "completed_trades",
+        "confidence",
+        "copy_quality",
     ]
     for column in columns:
         if column not in df.columns:
-            df[column] = "" if column in {"whale_tier", "wallet", "chain"} else 0
+            df[column] = "" if column in {"whale_tier", "wallet", "confidence", "copy_quality"} else 0
     metric_cols = st.columns(4)
     with metric_cols[0]:
         render_metric_card("Wallets Found", f"{len(rows):,}", "Public candidates", "blue")
     with metric_cols[1]:
         render_metric_card("Shown", f"{len(df):,}", "After filters", "green")
     with metric_cols[2]:
-        render_metric_card("Best Score", f"{safe_number(df['whale_score'].max()):.2f}", "Crypto whale rank", "green")
+        render_metric_card("Best Copy Score", f"{safe_number(df['whale_score'].max()):.2f}", "Quality-weighted rank", "green")
     with metric_cols[3]:
-        render_metric_card("Top Volume", format_money(df["total_volume"].max()), "Observed transfers", "blue")
+        best_roi = pd.to_numeric(df["roi_pct"], errors="coerce").max()
+        render_metric_card("Top Estimated ROI", format_percent(best_roi), "Completed cycles", "green" if safe_number(best_roi) >= 0 else "red")
     ranking_event = st.dataframe(
         style_financial_table(df[columns]),
         use_container_width=True,
@@ -2865,15 +2899,15 @@ def render_crypto_dashboard(
         column_config={
             "whale_tier": st.column_config.TextColumn("Tier", width=130),
             "wallet": st.column_config.TextColumn("Wallet Address", width=420, pinned=True),
-            "chain": "Chain",
             "whale_score": st.column_config.NumberColumn("Whale Score", format="%.2f", alignment="right"),
-            "trend_score": st.column_config.NumberColumn("Trend Score", format="%.2f", alignment="right"),
+            "win_rate": st.column_config.NumberColumn("Win Rate", format="%.2f%%", alignment="right"),
+            "roi_pct": st.column_config.NumberColumn("Estimated ROI", format="%.2f%%", alignment="right"),
+            "net_profit": st.column_config.NumberColumn("Net Profit", format="$%.2f", alignment="right"),
             "total_volume": st.column_config.NumberColumn("Total Volume", format="$%.2f", alignment="right"),
-            "avg_trade_size": st.column_config.NumberColumn("Average Position Size", format="$%.2f", alignment="right"),
-            "largest_trade": st.column_config.NumberColumn("Largest Transfer", format="$%.2f", alignment="right"),
-            "recent_activity": st.column_config.NumberColumn("Recent Transfers", format="%d", alignment="right"),
-            "trade_count": st.column_config.NumberColumn("Transfers", format="%d", alignment="right"),
-            "unique_tokens": st.column_config.NumberColumn("Tokens", format="%d", alignment="right"),
+            "avg_trade_size": st.column_config.NumberColumn("Average Trade Size", format="$%.2f", alignment="right"),
+            "completed_trades": st.column_config.NumberColumn("Completed Trades", format="%d", alignment="right"),
+            "confidence": st.column_config.TextColumn("Confidence", width=130),
+            "copy_quality": st.column_config.TextColumn("Copy Quality", width=140),
         },
     )
     selected_wallet = None
@@ -3037,7 +3071,7 @@ with st.sidebar:
             max_value=100.0,
             value=0.0,
             step=1.0,
-            help="For MVP transfer data this is usually not calculable and remains 0.",
+            help="Uses completed public swap cycles when a wallet has visible buys followed by sells.",
         )
     else:
         page = st.radio("Polymarket", ["Dashboard", "Wallet Details", "Watchlist"])

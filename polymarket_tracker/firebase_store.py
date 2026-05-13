@@ -211,16 +211,31 @@ class FirebaseStore:
     ) -> list[dict]:
         wallet = wallet_address.lower()
         now = self._now_timestamp()
+        existing_fields: dict = {}
+        existing_response = self._request(
+            "GET",
+            self._doc_url("users", user_id, collection, wallet),
+            headers=self._auth_headers(id_token),
+        )
+        if existing_response.status_code == 200:
+            existing_fields = self._document_fields(self._handle_response(existing_response) or {})
+        elif existing_response.status_code != 404:
+            self._handle_response(existing_response)
         values = {
             "wallet_address": wallet,
-            "wallet_label": wallet_label or "",
-            "created_at": now,
+            "wallet_label": wallet_label or existing_fields.get("wallet_label") or "",
+            "created_at": existing_fields.get("created_at") or now,
+            "added_at": existing_fields.get("added_at") or existing_fields.get("created_at") or now,
             "updated_at": now,
         }
         if metadata:
             values.update(metadata)
             values["wallet_address"] = wallet
-            values["wallet_label"] = wallet_label or str(metadata.get("wallet_label") or "")
+            values["wallet_label"] = wallet_label or str(
+                metadata.get("wallet_label") or existing_fields.get("wallet_label") or ""
+            )
+            values["created_at"] = existing_fields.get("created_at") or metadata.get("created_at") or now
+            values["added_at"] = existing_fields.get("added_at") or metadata.get("added_at") or values["created_at"]
             values["updated_at"] = now
         response = self._request(
             "PATCH",

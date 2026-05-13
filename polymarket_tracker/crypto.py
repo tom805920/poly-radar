@@ -829,6 +829,9 @@ def _analyze_swap_trade_cycles(
                     "amount": amount_bought,
                     "cost": dollar_value,
                     "entry_ts": timestamp_raw,
+                    "entry_value": dollar_value,
+                    "entry_amount": amount_bought,
+                    "entry_tx_hash": str(event.get("tx_hash") or ""),
                 }
             )
             last_prices[bought_token] = dollar_value / amount_bought
@@ -866,12 +869,27 @@ def _analyze_swap_trade_cycles(
                 completed.append(
                     {
                         "token": sold_token,
+                        "entry_value": matched_cost,
+                        "exit_value": matched_proceeds,
                         "profit": profit,
                         "cost_basis": matched_cost,
                         "proceeds": matched_proceeds,
                         "return_pct": (profit / matched_cost * 100) if matched_cost else 0.0,
+                        "roi_pct": (profit / matched_cost * 100) if matched_cost else 0.0,
                         "hold_hours": max(0.0, (timestamp_raw - entry_ts) / 3600),
+                        "entry_timestamp_raw": int(entry_ts),
+                        "exit_timestamp_raw": timestamp_raw,
                         "timestamp_raw": timestamp_raw,
+                        "entry_tx_hash": next(
+                            (
+                                str(lot.get("entry_tx_hash") or "")
+                                for lot in lots.get(sold_token, [])
+                                if lot.get("entry_tx_hash")
+                            ),
+                            "",
+                        ),
+                        "exit_tx_hash": str(event.get("tx_hash") or ""),
+                        "confidence": "High",
                     }
                 )
                 clear_buy_sell_events += 1
@@ -979,6 +997,7 @@ def _analyze_swap_trade_cycles(
         "avg_trade_size": avg_trade_size,
         "largest_trade": max(trade_values or transfer_values or [0.0]),
         "completed_trades": completed_trades,
+        "completed_cycles": completed,
         "profitable_trade_pct": profitable_trade_pct,
         "profitable_swap_pct": profitable_trade_pct,
         "win_rate": profitable_trade_pct,
@@ -1036,6 +1055,7 @@ def calculate_crypto_wallet_score(
             "trade_count": 0,
             "unique_tokens": 0,
             "completed_trades": 0,
+            "completed_cycles": [],
             "profitable_swaps_count": 0,
             "losing_swaps_count": 0,
             "avg_return_per_trade": None,
@@ -1144,6 +1164,7 @@ def calculate_crypto_wallet_score(
         "trade_count": int(trade_count),
         "unique_tokens": int(len(tokens)),
         "completed_trades": completed_trades,
+        "completed_cycles": quality["completed_cycles"],
         "profitable_swaps_count": int(quality["profitable_swaps_count"]),
         "losing_swaps_count": int(quality["losing_swaps_count"]),
         "avg_return_per_trade": round(float(quality["avg_return_per_trade"]), 2) if completed_trades else None,

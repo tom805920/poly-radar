@@ -10,14 +10,14 @@ Users must log in with Firebase Authentication before using the dashboard. Polym
 - Provides two top-level tabs: **Polymarket** and **Crypto**.
 - Pulls public wallet data from Polymarket APIs.
 - Discovers candidate wallets from recent public Polymarket trades, or lets you paste wallet addresses manually.
-- Adds a Crypto whale finder for public on-chain activity on Ethereum, BNB Chain, Base, and Arbitrum.
+- Adds a Crypto wallet finder for public on-chain activity on Ethereum, BNB Chain, Base, and Arbitrum.
 - The Crypto tab does not track private Binance or other exchange user accounts; it only uses public wallet/transfer data.
-- Calculates whale-focused metrics: net profit, ROI, win rate, adjusted win rate, total traded volume, average trade size, largest trade, resolved markets, copyability, and bot-likeness warnings.
-- Whale Mode is enabled by default and prioritizes wallets with meaningful capital.
+- Calculates wallet-focused metrics: net profit, ROI, win rate, adjusted win rate, total traded volume, average trade size, largest trade, resolved markets, copyability, and bot-likeness warnings.
+- Capital Mode is enabled by default for Polymarket and prioritizes wallets with meaningful capital.
 - Ranks wallets from best to worst using a reliability-adjusted score:
 
 ```text
-Whale Score =
+Wallet Score =
 Profit x 0.30
 + Win Rate x 0.25
 + Volume Traded x 0.20
@@ -26,7 +26,7 @@ Profit x 0.30
 + Activity Frequency x 0.05
 ```
 
-Each whale metric is normalized from 0 to 100 before weighting. Bot-like repetition, tiny high-frequency flow, concentrated one-off wins, and weak sizing reduce the score. Wallets are grouped into tiers: Kraken, Leviathan, Blue Whale, Shark, and Dolphin.
+Each wallet metric is normalized from 0 to 100 before weighting. Bot-like repetition, tiny high-frequency flow, concentrated one-off wins, and weak sizing reduce the score. Wallets are grouped into tiers: Kraken, Leviathan, Blue Whale, Shark, and Dolphin.
 
 ```text
 Standard Score =
@@ -59,9 +59,9 @@ The Polymarket Data API currently limits `/trades` historical pagination. The ap
 
 The CLOB `prices-history` endpoint is treated as best-effort. The app never asks for large ranges in one request; it fetches one-day chunks first, retries unavailable windows in six-hour chunks, caches each token/time window, and keeps ranking wallets if entry timing cannot be estimated.
 
-Fast Mode scans recent trades, analyzes the selected number of candidate wallets, skips price history and deep wallet history, and respects the sidebar runtime/API-call limits. In Whale Mode, Fast Mode is best treated as a quick whale-candidate scan; turn it off for net profit and resolved-market whale filters.
+Fast Mode scans recent trades, analyzes the selected number of candidate wallets, skips price history and deep wallet history, and respects the sidebar runtime/API-call limits. In Capital Mode, Fast Mode is best treated as a quick candidate scan; turn it off for net profit and resolved-market filters.
 
-The Crypto tab uses public on-chain wallet activity through Etherscan/BscScan-style APIs where configured. Discovery scans recent ERC-20 `Transfer` logs for large stable-token movement, expands optional seed wallets through wallet transaction history, and includes recent native transfers for wallet detail/scoring context. Wallet activity groups transfers by transaction hash to infer public DEX swaps when a wallet sends one asset and receives another in the same transaction. Uncertain cases are labelled as possible swaps. Realized P/L and win rate are not reliably calculable from transfer history alone, so the UI labels those as unavailable rather than guessing.
+The Crypto tab uses public on-chain wallet activity through Etherscan/BscScan-style APIs where configured. Discovery scans recent ERC-20 `Transfer` logs for large stable-token movement, expands optional seed wallets through wallet transaction history, and includes recent native transfers for wallet detail/scoring context. Wallet activity groups transfers by transaction hash to infer public swaps when a wallet sends one asset and receives another in the same transaction. Uncertain cases are labelled as possible swaps. Trade Success Rate is calculated only from completed buy/sell trade cycles; incomplete data is labelled unavailable rather than guessed.
 
 ## Install
 
@@ -137,9 +137,9 @@ Streamlit will print a local URL, usually `http://localhost:8501`.
 2. Choose the **Polymarket** or **Crypto** tab under the WhaleWatch header.
 3. Use the sidebar controls for that market.
 4. In Polymarket, click **Discover Wallets** to scan recent public trades for active candidate wallets.
-5. In Crypto, click **Discover Crypto Whales** to scan public on-chain transfer activity.
-6. Keep Whale Mode on for a whale-focused Polymarket first pass:
-   - minimum whale score
+5. In Crypto, click **Discover Crypto Wallets** to scan public on-chain transfer activity.
+6. Keep Capital Mode on for a capital-focused Polymarket first pass:
+   - minimum wallet score
    - minimum realized profit
    - minimum total volume
    - minimum average position size

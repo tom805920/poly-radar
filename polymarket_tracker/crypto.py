@@ -747,7 +747,7 @@ def _quality_reasons(
 ) -> list[str]:
     reasons: list[str] = []
     if completed_trades and profitable_trade_pct is not None:
-        reasons.append(f"{profitable_trade_pct:.0f}% profitable trades")
+        reasons.append(f"{profitable_trade_pct:.0f}% trade success rate")
     if roi_pct >= 20:
         reasons.append("Strong estimated ROI")
     elif roi_pct < -5:
@@ -759,7 +759,7 @@ def _quality_reasons(
     if consistency_score >= 65 and completed_trades >= 2:
         reasons.append("Consistent trade cycles")
     if confidence != "High":
-        reasons.append(f"{confidence} confidence: limited swap-cycle history")
+        reasons.append(f"{confidence} confidence: limited completed trade history")
     return reasons[:5] or ["Low confidence: mostly transfers, weak estimate"]
 
 
@@ -788,6 +788,57 @@ def _copy_quality(
     if completed_trades >= 2 and profitable_trade_pct >= 55 and roi_pct >= 0 and consistency_score >= 45:
         return "Strong"
     return "Risky" if roi_pct < 0 else "Unproven"
+
+
+def _bot_risk(
+    events: list[dict],
+    activity: list[dict],
+    avg_trade_size: float,
+    trade_count: int,
+    trading_frequency: float,
+    avg_hold_time_hours: float | None,
+) -> tuple[str, float, list[str]]:
+    reasons: list[str] = []
+    score = 0.0
+    swap_events = [row for row in events if row.get("category") == "Trades / Swaps"]
+    transfer_events = [row for row in events if row.get("category") != "Trades / Swaps"]
+    values = [round(float(row.get("dollar_value") or 0), -1) for row in swap_events if float(row.get("dollar_value") or 0) > 0]
+    if values:
+        most_common_count = max(values.count(value) for value in set(values))
+        repetitive_ratio = most_common_count / len(values)
+        if len(values) >= 8 and repetitive_ratio >= 0.55:
+            score += 35
+            reasons.append("repetitive same-size trades")
+    if trade_count >= 80 and avg_trade_size < 500:
+        score += 35
+        reasons.append("high count with tiny average trade size")
+    elif avg_trade_size and avg_trade_size < 100:
+        score += 20
+        reasons.append("tiny average trade size")
+    if trading_frequency >= 20:
+        score += 30
+        reasons.append("extreme trade frequency")
+    elif trading_frequency >= 8:
+        score += 18
+        reasons.append("high trade frequency")
+    if avg_hold_time_hours is not None and avg_hold_time_hours <= 0.25 and trade_count >= 5:
+        score += 30
+        reasons.append("ultra-short holding times")
+    buy_count = sum(1 for row in swap_events if str(row.get("action") or "").upper() == "BUY")
+    sell_count = sum(1 for row in swap_events if str(row.get("action") or "").upper() == "SELL")
+    if buy_count >= 5 and sell_count >= 5:
+        balance = min(buy_count, sell_count) / max(buy_count, sell_count)
+        if balance >= 0.85 and avg_hold_time_hours is not None and avg_hold_time_hours <= 2:
+            score += 22
+            reasons.append("mirrored buy/sell pattern")
+    if len(transfer_events) >= 40 and len(swap_events) <= 2:
+        score += 24
+        reasons.append("mostly repetitive transfers")
+    if len(activity) >= 150 and trade_count <= 3:
+        score += 18
+        reasons.append("spam transfer pattern")
+    label = "Likely Bot / Market Maker" if score >= 55 else "Unclear" if score >= 25 else "Likely Human Trader"
+    return label, min(100.0, round(score, 2)), reasons[:4]
 
 
 def _analyze_swap_trade_cycles(
@@ -1074,6 +1125,9 @@ def calculate_crypto_wallet_score(
             "copy_quality": "Unproven",
             "copy_reasons": ["Excluded non-trader wallet"],
             "copy_reason_text": "Excluded non-trader wallet",
+            "bot_risk": "Likely Bot / Market Maker",
+            "bot_risk_score": 100.0,
+            "bot_risk_reasons": ["contract, exchange, burn, or system address"],
             "profit_note": "Excluded from crypto scoring because this is an obvious non-trader address.",
             "explorer_url": CHAIN_CONFIGS[chain]["explorer"].format(wallet=wallet),
         }
@@ -1138,8 +1192,20 @@ def calculate_crypto_wallet_score(
         float(quality["max_drawdown_estimate"]),
         whale_score,
     )
+    bot_risk, bot_risk_score, bot_risk_reasons = _bot_risk(
+        events,
+        activity,
+        avg_trade_size,
+        trade_count,
+        float(quality["trading_frequency"] or 0),
+        quality["avg_hold_time_hours"],
+    )
+    if bot_risk == "Likely Bot / Market Maker":
+        whale_score = round(max(0, whale_score * 0.55), 2)
+    elif bot_risk == "Unclear":
+        whale_score = round(max(0, whale_score * 0.88), 2)
     profit_note = (
-        "Estimated from public DEX swap cycles; confidence improves when both buys and later sells are visible."
+        "Estimated from completed public buy/sell trade cycles; confidence improves when both buys and later sells are visible."
         if quality["completed_trades"]
         else "No completed buy/sell cycle detected yet; this wallet is scored as unproven until sell history appears."
     )
@@ -1183,6 +1249,9 @@ def calculate_crypto_wallet_score(
         "copy_quality": copy_quality,
         "copy_reasons": quality["copy_reasons"],
         "copy_reason_text": quality["copy_reason_text"],
+        "bot_risk": bot_risk,
+        "bot_risk_score": bot_risk_score,
+        "bot_risk_reasons": bot_risk_reasons,
         "profit_note": profit_note,
         "explorer_url": CHAIN_CONFIGS[chain]["explorer"].format(wallet=wallet),
     }

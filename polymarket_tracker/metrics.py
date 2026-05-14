@@ -84,7 +84,7 @@ def bot_likeness_warning(
 ) -> str:
     warnings: list[str] = []
     if win_rate >= 70 and total_volume < 25000:
-        warnings.append("High win rate but low capital - likely not a whale")
+        warnings.append("High win rate but low capital - likely not high-capital")
     if avg_trade_size < 250:
         warnings.append("Tiny average trade size")
     if trade_count >= 20 and same_size_ratio >= 0.65:

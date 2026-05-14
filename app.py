@@ -729,6 +729,7 @@ def style_financial_table(table_df: pd.DataFrame):
             "realized_profit_estimate",
             "unrealized_profit_estimate",
             "consistency_score",
+            "total_bought",
             "total_bought_recently",
             "largest_buy_size",
             "entry_value",
@@ -3123,7 +3124,14 @@ def recently_bought_tokens_dataframe(
     activity_df = enrich_crypto_activity_display(activity_df)
     if activity_df.empty:
         return pd.DataFrame()
-    for column, default in {"action": "", "category": "", "token_bought": "", "wallet": "", "dollar_value": 0.0}.items():
+    for column, default in {
+        "action": "",
+        "category": "",
+        "token_bought": "",
+        "wallet": "",
+        "dollar_value": 0.0,
+        "timestamp_raw": 0,
+    }.items():
         if column not in activity_df.columns:
             activity_df[column] = default
     cutoff = int(time.time()) - int(lookback_days) * 24 * 3600
@@ -3138,59 +3146,70 @@ def recently_bought_tokens_dataframe(
     buys["token"] = buys["token_bought"].astype(str).str.upper().replace("", "UNKNOWN")
     rows = []
     for token, token_rows in buys.groupby("token"):
-        largest_idx = pd.to_numeric(token_rows["dollar_value"], errors="coerce").fillna(0).idxmax()
+        dollar_values = pd.to_numeric(token_rows["dollar_value"], errors="coerce").fillna(0)
+        timestamps = pd.to_numeric(token_rows["timestamp_raw"], errors="coerce").fillna(0)
+        largest_idx = dollar_values.idxmax()
         largest = token_rows.loc[largest_idx]
         wallet = str(largest.get("wallet") or "")
         rows.append(
             {
                 "token": token,
-                "total_bought_recently": float(pd.to_numeric(token_rows["dollar_value"], errors="coerce").fillna(0).sum()),
-                "whale_buyers": int(token_rows["wallet"].astype(str).str.lower().nunique()),
+                "total_bought": float(dollar_values.sum()),
+                "buyer_wallets": int(token_rows["wallet"].astype(str).str.lower().nunique()),
+                "buy_count": int(len(token_rows)),
                 "largest_buyer_wallet": crypto_wallet_label_text(wallet, ranked_lookup),
                 "largest_buy_size": safe_number(largest.get("dollar_value")),
-                "last_buy_time": format_crypto_timestamp(pd.to_numeric(token_rows["timestamp_raw"], errors="coerce").fillna(0).max()),
+                "last_buy_time": format_crypto_timestamp(timestamps.max()),
             }
         )
-    return pd.DataFrame(rows).sort_values(["total_bought_recently", "whale_buyers"], ascending=False)
+    return pd.DataFrame(rows).sort_values(["total_bought", "buy_count"], ascending=False)
 
 
 def render_recently_bought_tokens_leaderboard(
     activity_df: pd.DataFrame,
     ranked_lookup: dict[str, dict] | None,
     key_prefix: str,
+    title: str,
+    mode: str,
+    lookback_days: int,
+    min_buy_size: float = 0.0,
 ) -> None:
-    render_compact_title("Recently Bought Tokens", badge("Recent buys", "green"))
-    filter_cols = st.columns([1, 1, 2])
-    window_label = filter_cols[0].selectbox(
-        "Token window",
-        ["Last 24h", "Last 7d", "Last 30d"],
-        index=1,
-        key=f"{key_prefix}-token-window",
-    )
-    min_buy_size = filter_cols[1].number_input(
-        "Minimum buy size",
-        min_value=0.0,
-        value=1000.0,
-        step=500.0,
-        key=f"{key_prefix}-token-min-buy",
-    )
-    lookback_days = {"Last 24h": 1, "Last 7d": 7, "Last 30d": 30}[window_label]
+    render_compact_title(title, badge("BUY activity only", "green"))
     leaderboard_df = recently_bought_tokens_dataframe(activity_df, float(min_buy_size), lookback_days, ranked_lookup)
     if leaderboard_df.empty:
-        render_empty_state("No recent buys", "No buy swaps matched the selected token filters.")
+        render_empty_state("No recent buys found.", "")
         return
+    if mode == "wallet":
+        display_df = leaderboard_df[["token", "total_bought", "buy_count", "largest_buy_size", "last_buy_time"]].copy()
+        column_config = {
+            "token": st.column_config.TextColumn("Token", width=120),
+            "total_bought": st.column_config.NumberColumn("Total Bought", format="$%.2f", alignment="right"),
+            "buy_count": st.column_config.NumberColumn("Number of Buys", format="%d", alignment="right"),
+            "largest_buy_size": st.column_config.NumberColumn("Largest Buy", format="$%.2f", alignment="right"),
+            "last_buy_time": st.column_config.TextColumn("Last Buy Time", width=180),
+        }
+    else:
+        display_df = leaderboard_df[[
+            "token",
+            "total_bought",
+            "buyer_wallets",
+            "buy_count",
+            "largest_buy_size",
+            "last_buy_time",
+        ]].copy()
+        column_config = {
+            "token": st.column_config.TextColumn("Token", width=120),
+            "total_bought": st.column_config.NumberColumn("Total Bought by Watched Wallets", format="$%.2f", alignment="right"),
+            "buyer_wallets": st.column_config.NumberColumn("Number of Watched Wallets Buying It", format="%d", alignment="right"),
+            "buy_count": st.column_config.NumberColumn("Number of Buys", format="%d", alignment="right"),
+            "largest_buy_size": st.column_config.NumberColumn("Largest Buy", format="$%.2f", alignment="right"),
+            "last_buy_time": st.column_config.TextColumn("Last Buy Time", width=180),
+        }
     st.dataframe(
-        style_financial_table(leaderboard_df),
+        style_financial_table(display_df),
         use_container_width=True,
         hide_index=True,
-        column_config={
-            "token": st.column_config.TextColumn("Token", width=120),
-            "total_bought_recently": st.column_config.NumberColumn("Total Bought Recently", format="$%.2f", alignment="right"),
-            "whale_buyers": st.column_config.NumberColumn("Buyer Wallets", format="%d", alignment="right"),
-            "largest_buyer_wallet": st.column_config.TextColumn("Largest Buyer Wallet", width=460),
-            "largest_buy_size": st.column_config.NumberColumn("Largest Buy Size", format="$%.2f", alignment="right"),
-            "last_buy_time": st.column_config.TextColumn("Last Buy Time", width=180),
-        },
+        column_config=column_config,
     )
 
 
@@ -3281,6 +3300,60 @@ def render_crypto_activity_table(trade_df: pd.DataFrame, ranked_lookup: dict[str
     render_crypto_activity_cards(trade_df, ranked_lookup)
 
 
+def render_crypto_strategy_snapshot(
+    wallet: str,
+    metadata: dict,
+    activity_df: pd.DataFrame,
+    ranked_lookup: dict[str, dict] | None = None,
+) -> None:
+    buys = recently_bought_tokens_dataframe(activity_df, 0.0, 30, ranked_lookup)
+    tokens = []
+    if not buys.empty and "token" in buys.columns:
+        tokens = [str(token) for token in buys["token"].head(3).tolist() if str(token)]
+    avg_trade = optional_metric_number(metadata.get("avg_trade_size"))
+    success_rate = format_optional_percent(crypto_trade_success_rate_value(metadata))
+    confidence = str(metadata.get("confidence") or "Low")
+    bot_risk = str(metadata.get("bot_risk") or "Unclear")
+    copy_quality = str(metadata.get("copy_quality") or "Unproven")
+    buy_count = int(pd.to_numeric(buys.get("buy_count", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not buys.empty else 0
+    total_bought = float(pd.to_numeric(buys.get("total_bought", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not buys.empty else 0.0
+    if tokens:
+        focus = f"Recent focus: {', '.join(tokens)}."
+    else:
+        focus = "Recent focus: no clear buy pattern yet."
+    if avg_trade is None:
+        sizing = "Sizing: not enough clean swap data."
+    elif avg_trade >= 25_000:
+        sizing = "Sizing: large entries."
+    elif avg_trade >= 5_000:
+        sizing = "Sizing: medium entries."
+    else:
+        sizing = "Sizing: smaller entries."
+    summary = (
+        f"{focus} {sizing} Trade Success Rate: {success_rate}. "
+        f"Recent buys: {buy_count} totaling {format_money(total_bought)}. Bot Risk: {bot_risk}."
+    )
+    confidence_tone = {"High": "green", "Medium": "blue", "Low": "red"}.get(confidence, "blue")
+    bot_tone = {"Likely Human Trader": "green", "Unclear": "blue", "Likely Bot / Market Maker": "red"}.get(bot_risk, "blue")
+    quality_tone = {"Elite": "green", "Strong": "green", "Risky": "red", "Unproven": "blue"}.get(copy_quality, "blue")
+    st.markdown(
+        f"""
+        <div class="ww-wallet-panel">
+          <div class="ww-brand-row">
+            <div>{badge("Strategy Snapshot", "green")}</div>
+            <div class="ww-pill-row">
+              {badge(confidence + " confidence", confidence_tone)}
+              {badge(copy_quality, quality_tone)}
+              {badge(bot_risk, bot_tone)}
+            </div>
+          </div>
+          <div class="ww-section-copy">{html.escape(summary)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_crypto_wallet_details(
     chain: str,
     token_filter: str,
@@ -3317,6 +3390,18 @@ def render_crypto_wallet_details(
             trade_df["category"] = ""
         trade_df = trade_df[pd.to_numeric(trade_df["dollar_value"], errors="coerce").fillna(0) >= float(min_value)]
         trade_df = trade_df[trade_df["category"] == "Trades / Swaps"]
+    metadata = {**crypto_watchlist_item_map().get(str(viewer_wallet).lower(), {}), **ranked_lookup.get(str(viewer_wallet).lower(), {})}
+    render_crypto_strategy_snapshot(viewer_wallet, metadata, trade_df, ranked_lookup)
+    render_recently_bought_tokens_leaderboard(
+        trade_df,
+        ranked_lookup,
+        f"crypto-wallet-{viewer_wallet}",
+        "Most Bought Recently",
+        "wallet",
+        lookback_days,
+        float(min_value),
+    )
+    render_compact_title("Recent Activity")
     render_crypto_activity_table(trade_df, ranked_lookup)
     render_crypto_completed_trade_cycles(viewer_wallet, chain, token_filter, lookback_days)
 
@@ -3510,7 +3595,15 @@ def render_crypto_watchlist(
         ranked_lookup,
         last_times,
     )
-    render_recently_bought_tokens_leaderboard(activity_df, ranked_lookup, "crypto-watchlist")
+    render_recently_bought_tokens_leaderboard(
+        activity_df,
+        ranked_lookup,
+        "crypto-watchlist",
+        "Recently Bought by Watchlist",
+        "watchlist",
+        int(time_period_days),
+        0.0,
+    )
     render_compact_title("Latest Activity")
     render_crypto_activity_cards(activity_df, ranked_lookup, limit=8)
     render_compact_title("Saved Crypto Wallets")
@@ -3659,19 +3752,6 @@ def render_crypto_dashboard(
         best_roi = pd.to_numeric(df["roi_pct"], errors="coerce").max()
         render_metric_card("Top Estimated ROI", format_optional_percent(best_roi), "Completed cycles only", "green" if safe_number(best_roi) >= 0 else "red")
     ranked_lookup = {str(row["wallet"]).lower(): row.to_dict() for _, row in df.iterrows()}
-    token_leaderboard_wallets = (
-        list(df["wallet"].astype(str).head(20))
-        + [str(wallet) for wallet in st.session_state.get("crypto_watchlist", [])]
-    )
-    token_activity_df = collect_crypto_activity_for_wallets(
-        token_leaderboard_wallets,
-        chain,
-        token_filter,
-        min(int(time_period_days), 30),
-        ranked_lookup,
-        max_wallets=20,
-    )
-    render_recently_bought_tokens_leaderboard(token_activity_df, ranked_lookup, "crypto-dashboard")
     display_df = df[columns].copy()
     completed_mask = pd.to_numeric(df["completed_trades"], errors="coerce").fillna(0) > 0
     display_df.loc[~completed_mask, ["profitable_trade_pct", "roi_pct", "net_profit", "avg_profit_per_completed_trade", "trading_frequency"]] = None
